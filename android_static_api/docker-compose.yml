@@ -1,0 +1,25 @@
+version: "3.9"
+
+services:
+  android-static-backend:
+    build: .
+    restart: always
+    container_name: android-static-backend
+    ports:
+      - "8010:8010"
+
+  queue-wrapper:
+    build: ./queue_wrapper
+    restart: always
+    container_name: android-static-wrapper
+    ports:
+      - "5001:5001"
+    environment:
+      - ANDROGUARD_API=http://android-static-backend:8010/load_apk
+    depends_on:
+      - android-static-backend
+
+networks:
+  default:
+    name: app-sso-network
+    external: true

@@ -1,0 +1,54 @@
+version: "3.9"
+
+services:
+
+  frontend:
+    build: ./frontend
+    restart: 'always'
+    container_name: cloud-frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./certs:/app/certs:ro
+    networks:
+      app-sso-network:
+        ipv4_address: 172.27.0.11
+    depends_on:
+      - backend
+
+  backend:
+    build: ./server
+    restart: 'always'
+    container_name: cloud-backend
+    networks:
+      app-sso-network:
+        ipv4_address: 172.27.0.12
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./certs:/app/certs:ro
+    depends_on:
+      - mongodb
+
+  mongodb:
+    image: mongo:8.0
+    restart: 'always'
+    container_name: cloud-mongodb
+    ports:
+      - "27018:27018"
+    command: ["--port", "27018"]
+    networks:
+      app-sso-network:
+        ipv4_address: 172.27.0.13
+    volumes:
+      - mongo-data:/data/db
+
+volumes:
+  mongo-data:
+
+networks:
+  app-sso-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.27.0.0/16
