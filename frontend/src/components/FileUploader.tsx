@@ -1,13 +1,120 @@
 import React, { useState, useCallback } from "react";
 import { sha256 } from "js-sha256";
-import { Card, CardHeader, CardContent, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
-import { UploadCloud, FileText, AlertTriangle, Info } from "lucide-react";
+import {
+  UploadCloud,
+  FileText,
+  AlertTriangle,
+  Info,
+  Shield,
+  FileSearch,
+  Zap,
+  CheckCircle,
+  RotateCcw,
+} from "lucide-react";
 import { getIdToken } from "../firebase/auth";
 
 type AnalysisType = "static" | "dynamic";
+
+// ─── Static config ────────────────────────────────────────────────────────────
+
+const ANALYSIS_OPTIONS: {
+  value: AnalysisType;
+  label: string;
+  desc: string;
+  icon: React.ComponentType<{ className?: string }>;
+}[] = [
+  {
+    value: "static",
+    label: "Static Analysis",
+    desc: "Inspect code, permissions and configuration without running the app.",
+    icon: FileSearch,
+  },
+  {
+    value: "dynamic",
+    label: "Dynamic Analysis",
+    desc: "Run the app in a sandbox to observe live runtime behaviour.",
+    icon: Zap,
+  },
+];
+
+interface ResultMeta {
+  icon: React.ComponentType<{ className?: string }>;
+  tint: string;
+  title: string;
+  desc: string;
+  btnLabel: string;
+}
+
+const RESULT_META: Record<string, ResultMeta> = {
+  duplicate_found: {
+    icon: AlertTriangle,
+    tint: "bg-amber-500/15 text-amber-400",
+    title: "Duplicate file detected",
+    desc: "This file has already been uploaded with the same analysis type.",
+    btnLabel: "Select another file",
+  },
+  reusing_upload: {
+    icon: Info,
+    tint: "bg-blue-500/15 text-blue-400",
+    title: "Reusing existing upload",
+    desc: "This file already exists. The analysis type is different, so we're reusing the stored file.",
+    btnLabel: "Upload another file",
+  },
+  uploaded_for_analysis: {
+    icon: CheckCircle,
+    tint: "bg-green-500/15 text-green-400",
+    title: "Uploaded for analysis",
+    desc: "Your file was uploaded successfully and is queued for analysis.",
+    btnLabel: "Analyze another file",
+  },
+  error: {
+    icon: AlertTriangle,
+    tint: "bg-red-500/15 text-red-400",
+    title: "Upload failed",
+    desc: "Something went wrong while uploading your file. Please try again.",
+    btnLabel: "Try again",
+  },
+};
+
+const ResultPanel: React.FC<{
+  status: string;
+  file: File | null;
+  onReset: () => void;
+}> = ({ status, file, onReset }) => {
+  const meta = RESULT_META[status];
+  const Icon = meta.icon;
+  return (
+    <div className="flex flex-col items-center gap-3 rounded-xl border border-border p-10 text-center">
+      <div className={`flex h-12 w-12 items-center justify-center rounded-full ${meta.tint}`}>
+        <Icon className="h-6 w-6" />
+      </div>
+      <div>
+        <p className="font-semibold">{meta.title}</p>
+        <p className="mt-1 text-sm text-muted-foreground">{meta.desc}</p>
+      </div>
+      {file && (
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-muted/50 px-2.5 py-1 text-xs text-muted-foreground">
+          <FileText className="h-3.5 w-3.5" />
+          <span className="truncate max-w-[280px]">{file.name}</span>
+        </span>
+      )}
+      <Button
+        variant={status === "error" ? "destructive" : "outline"}
+        size="sm"
+        onClick={onReset}
+        className="mt-1"
+      >
+        {status === "error" && <RotateCcw className="h-4 w-4" />}
+        {meta.btnLabel}
+      </Button>
+    </div>
+  );
+};
+
+// ─── Main component ───────────────────────────────────────────────────────────
 
 // Optional prop to notify parent component of new upload
 interface FileUploaderProps {
@@ -67,7 +174,7 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUpload }) => {
   };
 
   const handleFile = useCallback(
-    
+
     // Take file object and set status to check for duplicate
     async (selectedFile: File) => {
 
@@ -145,12 +252,12 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUpload }) => {
         setProgress(100);
         if (xhr.status >= 200 && xhr.status < 300) {
           setStatus("uploaded_for_analysis");
-        
+
           // Consume a credit
           try {
             const token = await getIdToken();
             if (!token) throw new Error("User not logged in");
-          
+
             const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/consumeCredit`, {
               method: "POST",
               headers: {
@@ -158,7 +265,7 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUpload }) => {
                 "Content-Type": "application/json",
               },
             });
-          
+
             if (!res.ok) {
               console.error("Failed to consume credit:", await res.json());
             } else {
@@ -204,127 +311,132 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUpload }) => {
     if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]); // Handle file drop
   };
 
+  const isProcessing = status === "check_duplicate" || status === "uploading";
+
   return (
-    <div className="p-4 flex justify-center">
-      <Card className="w-[720px]">
-        <CardHeader>
-          <CardTitle>App Security Analysis</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-6">
+    <Card className="w-full">
+      <CardContent className="space-y-6 p-6">
 
-          {/* Idle / file selection */}
-          {status === "idle" && (
-            <div className="space-y-4">
-              {/* Analysis type selection using radio-like buttons */}
-              <Label className="mb-2 block">Analysis Type</Label>
-              <div className="flex space-x-4">
-                {(["static", "dynamic"] as AnalysisType[]).map((type) => (
-                  <div
-                    key={type}
-                    className="flex items-center cursor-pointer"
-                    onClick={() => setAnalysisType(type)}
-                  >
-                    {/* Custom radio button style */}
-                    <span className={`w-5 h-5 mr-2 rounded-full border-2 flex items-center justify-center
-                      ${analysisType === type
-                        ? "bg-primary border-primary"
-                        : "border-gray-400/50 bg-background hover:border-white transition-colors duration-200"
-                      }`}
+        {/* ── Header ────────────────────────────────────────────────────── */}
+        <div className="flex items-center gap-3">
+          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary/15 ring-1 ring-primary/25">
+            <Shield className="h-5 w-5 text-primary" />
+          </div>
+          <div>
+            <h2 className="text-lg font-semibold leading-tight">App Security Analysis</h2>
+            <p className="text-xs text-muted-foreground">Upload an APK or IPA to run an analysis</p>
+          </div>
+        </div>
+
+        <div className="h-px bg-border" />
+
+        {/* ── Idle: file selector ─────────────────────────────────────────── */}
+        {status === "idle" && (
+          <div className="space-y-5">
+            <div className="space-y-3">
+              <p className="text-sm font-medium">Choose analysis type</p>
+              <div className="grid grid-cols-2 gap-3">
+                {ANALYSIS_OPTIONS.map((opt) => {
+                  const Icon = opt.icon;
+                  const active = analysisType === opt.value;
+                  return (
+                    <button
+                      type="button"
+                      key={opt.value}
+                      onClick={() => setAnalysisType(opt.value)}
+                      className={`relative flex flex-col gap-2 rounded-xl border p-4 text-left transition-all
+                        ${active
+                          ? "border-primary bg-primary/10 ring-1 ring-primary/40"
+                          : "border-border bg-muted/20 hover:border-primary/40 hover:bg-muted/40"
+                        }`}
                     >
-                      {analysisType === type && <span className="w-2.5 h-2.5 rounded-full bg-white"></span>}
-                    </span>
-                    <Label>{type.charAt(0).toUpperCase() + type.slice(1)}</Label>
-                  </div>
-                ))}
+                      <div
+                        className={`flex h-9 w-9 items-center justify-center rounded-lg
+                          ${active ? "bg-primary/20 text-primary" : "bg-muted text-muted-foreground"}`}
+                      >
+                        <Icon className="h-5 w-5" />
+                      </div>
+                      <span className="text-sm font-semibold">{opt.label}</span>
+                      <span className="text-xs leading-snug text-muted-foreground">{opt.desc}</span>
+                      {active && (
+                        <CheckCircle className="absolute right-3 top-3 h-4 w-4 text-primary" />
+                      )}
+                    </button>
+                  );
+                })}
               </div>
-              
-              {/* Drag & drop area */}
-              <div
-                onDragOver={onDragOver}      // Highlight when dragging over
-                onDragLeave={onDragLeave}    // Remove highlight
-                onDrop={onDrop}              // Handle file drop
-                className={`flex flex-col items-center justify-center p-12 border-2 border-dashed rounded-lg cursor-pointer
-                  border-gray-400/50 hover:border-white transition-colors duration-200
-                  ${isDragOver ? "bg-white/20" : ""}`}
-                onClick={() => document.getElementById("file-upload")?.click()} // Open file dialog on click
-              >
-                <UploadCloud className="h-10 w-10 text-muted-foreground mb-4" />
-                <p className="text-muted-foreground text-center">
-                  Drag & drop your APK/IPA file here, or click to select a file.
+            </div>
+
+            <div
+              onDragOver={onDragOver}
+              onDragLeave={onDragLeave}
+              onDrop={onDrop}
+              onClick={() => document.getElementById("file-upload")?.click()}
+              className={`group flex cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed p-10 transition-all
+                ${isDragOver
+                  ? "border-primary bg-primary/10"
+                  : "border-border hover:border-primary/50 hover:bg-muted/30"
+                }`}
+            >
+              <div className="flex h-14 w-14 items-center justify-center rounded-full bg-primary/15 ring-1 ring-primary/20 transition-transform group-hover:scale-105">
+                <UploadCloud className="h-7 w-7 text-primary" />
+              </div>
+              <div className="text-center">
+                <p className="text-sm font-medium">Drag & drop your APK or IPA file</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  or <span className="font-medium text-primary">browse</span> to choose a file
                 </p>
-                <input
-                  id="file-upload"
-                  type="file"
-                  className="hidden"
-                  accept=".apk,.ipa"
-                  onChange={(e) => e.target.files && handleFile(e.target.files[0])} // Handle file selection
-                />
+              </div>
+              <p className="text-[11px] text-muted-foreground">.apk or .ipa</p>
+              <input
+                id="file-upload"
+                type="file"
+                className="hidden"
+                accept=".apk,.ipa"
+                onChange={(e) => e.target.files && handleFile(e.target.files[0])}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* ── Processing: hashing / duplicate check / upload ──────────────── */}
+        {isProcessing && (
+          <div className="flex flex-col items-center gap-5 rounded-xl border border-border bg-muted/20 p-10">
+            <div className="flex h-14 w-14 items-center justify-center rounded-full bg-primary/15 ring-1 ring-primary/20">
+              <UploadCloud className="h-7 w-7 text-primary animate-pulse" />
+            </div>
+            <div className="text-center">
+              <p className="font-medium">
+                {status === "check_duplicate"
+                  ? progress < 20
+                    ? "Calculating checksum…"
+                    : "Checking for duplicates…"
+                  : "Uploading file…"}
+              </p>
+              {file && (
+                <p className="mt-1 flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
+                  <FileText className="h-3.5 w-3.5" />
+                  <span className="truncate max-w-[320px]">{file.name}</span>
+                </p>
+              )}
+            </div>
+            <div className="w-full space-y-1.5">
+              <Progress value={progress} className="h-2" />
+              <div className="flex justify-between text-[11px] text-muted-foreground">
+                <span className="capitalize">{analysisType} analysis</span>
+                <span>{progress}%</span>
               </div>
             </div>
-          )}
+          </div>
+        )}
 
-          {/* Duplicate found */}
-          {status === "duplicate_found" && (
-            <div className="flex flex-col items-center justify-center p-12 border rounded-lg w-full">
-              {/* Show warning icon and title */}
-              <AlertTriangle className="mb-2  text-yellow-600 h-10 w-10" />
-              <p className="text-lg font-semibold text-center">Duplicate File Detected</p>
-              <p className="mt-2 text-center text-sm text-muted-foreground">
-                This file with the same analysis type has already been uploaded.
-              </p>
-              {/* Reset to allow uploading another file */}
-              <Button variant="outline" onClick={resetState} className="mt-6">
-                Select Another File
-              </Button>
-            </div>
-          )}
+        {/* ── Result states ───────────────────────────────────────────────── */}
+        {RESULT_META[status] && (
+          <ResultPanel status={status} file={file} onReset={resetState} />
+        )}
 
-          {/* Reusing upload */}
-          {status === "reusing_upload" && (
-            <div className="flex flex-col items-center justify-center p-12 border rounded-lg w-full">
-              {/* Show info icon and title */}
-              <Info className="mb-2 text-blue-600 h-10 w-10" />
-              <p className="text-lg font-semibold text-center">Reusing Existing Upload</p>
-              <p className="mt-2 text-center text-sm text-muted-foreground">
-                This file has already been uploaded. The analysis type is different, so we are reusing the existing file.
-              </p>
-              {/* Reset to allow uploading another file */}
-              <Button variant="outline" onClick={resetState} className="mt-6">
-                Upload Another File
-              </Button>
-            </div>
-          )}
-
-          {/* Uploading / uploaded / error */}
-          {["uploading", "uploaded_for_analysis", "error"].includes(status) && (
-            <div className="flex flex-col items-center justify-center p-12 border rounded-lg w-full">
-              {/* Display current upload status */}
-              <p className="mt-4 text-center font-medium">{status}</p>
-          
-              {/* Show file name + analysis type */}
-              {file && (
-                <div className="mt-2 text-sm text-muted-foreground flex items-center gap-2">
-                  <FileText className="h-4 w-4" />
-                  <span>{file.name} ({analysisType})</span>
-                </div>
-              )}
-
-              {/* Progress bar for uploading */}
-              {status === "uploading" && <Progress value={progress} className="w-full mt-4 h-3" />}
-            
-              {/* Show reset button for uploaded or error states */}
-              {["uploaded_for_analysis", "error"].includes(status) && (
-                <Button variant="outline" onClick={resetState} className="mt-6">
-                  {status === "error" ? "Try Again" : "Analyze Another File"}
-                </Button>
-              )}
-            </div>
-          )}
-
-        </CardContent>
-      </Card>
-    </div>
-
+      </CardContent>
+    </Card>
   );
 };
 

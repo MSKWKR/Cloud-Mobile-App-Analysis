@@ -4,7 +4,7 @@ import { login, register } from "../firebase/auth";
 import { auth } from "../firebase/config";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
-import { UserCircle } from "lucide-react";
+import { Shield, Mail, Lock, UserCircle, Loader2, AlertCircle, ArrowRight } from "lucide-react";
 
 interface AuthFormsProps {
   /** Called when the user chooses to proceed without an account */
@@ -78,70 +78,128 @@ const AuthForms: React.FC<AuthFormsProps> = ({ onContinueAsGuest }) => {
     }
   };
 
+  const switchMode = (m: "login" | "register") => {
+    setMode(m);
+    setError("");
+  };
+
   return (
-    <div className="flex flex-col w-full space-y-4">
-      <form onSubmit={handleSubmit} className="flex flex-col w-full space-y-4">
-        <h2 className="text-white text-xl font-semibold text-center">
-          {mode === "login" ? "Login" : "Register"}
-        </h2>
+    <div className="w-full space-y-6">
 
-        {error && <p className="text-red-500 text-sm">{error}</p>}
+      {/* ── Brand header ────────────────────────────────────────────────── */}
+      <div className="flex flex-col items-center gap-3 text-center">
+        <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/15 ring-1 ring-primary/25">
+          <Shield className="h-6 w-6 text-primary" />
+        </div>
+        <div>
+          <h1 className="text-xl font-semibold">App Security Analysis</h1>
+          <p className="mt-0.5 text-sm text-muted-foreground">
+            {mode === "login"
+              ? "Welcome back — sign in to continue."
+              : "Create an account to get started."}
+          </p>
+        </div>
+      </div>
 
-        <Input
-          type="email"
-          placeholder="Email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          required
-        />
-
-        <Input
-          type="password"
-          placeholder="Password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          required
-        />
-
-        <Button type="submit" disabled={loading}>
-          {loading ? "Please wait…" : mode === "login" ? "Login" : "Register"}
-        </Button>
-
-        <p className="text-sm text-gray-400 text-center">
-          {mode === "login" ? "Don't have an account?" : "Already have an account?"}{" "}
-          <Button
+      {/* ── Login / Register toggle ─────────────────────────────────────── */}
+      <div className="grid grid-cols-2 gap-1 rounded-xl border border-border bg-muted/30 p-1">
+        {(["login", "register"] as const).map((m) => (
+          <button
+            key={m}
             type="button"
-            variant="link"
-            className="text-blue-500 p-0 underline"
-            onClick={() => setMode(mode === "login" ? "register" : "login")}
+            onClick={() => switchMode(m)}
+            className={`rounded-lg py-2 text-sm font-medium transition-colors
+              ${mode === m
+                ? "bg-primary text-primary-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground"
+              }`}
           >
-            {mode === "login" ? "Register" : "Login"}
-          </Button>
-        </p>
+            {m === "login" ? "Login" : "Register"}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Form ────────────────────────────────────────────────────────── */}
+      <form onSubmit={handleSubmit} className="space-y-4">
+        {error && (
+          <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2.5">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+            <p className="text-sm text-destructive">{error}</p>
+          </div>
+        )}
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-muted-foreground">Email</label>
+          <div className="relative">
+            <Mail className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              type="email"
+              placeholder="you@example.com"
+              className="pl-9"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+            />
+          </div>
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-muted-foreground">Password</label>
+          <div className="relative">
+            <Lock className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              type="password"
+              placeholder="••••••••"
+              className="pl-9"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+            />
+          </div>
+        </div>
+
+        <Button type="submit" disabled={loading} className="w-full">
+          {loading ? (
+            <>
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Please wait…
+            </>
+          ) : (
+            <>
+              {mode === "login" ? "Sign in" : "Create account"}
+              <ArrowRight className="h-4 w-4" />
+            </>
+          )}
+        </Button>
       </form>
 
-      {/* Guest option */}
+      {/* ── Guest option ────────────────────────────────────────────────── */}
       {onContinueAsGuest && (
         <>
-          <div className="relative flex items-center gap-3">
-            <div className="flex-1 border-t border-gray-700" />
-            <span className="text-xs text-gray-500 shrink-0">or</span>
-            <div className="flex-1 border-t border-gray-700" />
+          <div className="flex items-center gap-3">
+            <div className="h-px flex-1 bg-border" />
+            <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
+              or
+            </span>
+            <div className="h-px flex-1 bg-border" />
           </div>
 
-          <Button
+          <button
             type="button"
-            variant="outline"
-            className="w-full gap-2 text-muted-foreground hover:text-foreground"
             onClick={onContinueAsGuest}
+            className="group flex w-full items-center gap-3 rounded-xl border border-border bg-muted/20 p-3.5 text-left transition-all hover:border-primary/40 hover:bg-muted/40"
           >
-            <UserCircle className="h-4 w-4" />
-            Continue as Guest — no account needed
-          </Button>
-
-          <p className="text-xs text-gray-500 text-center">
-            Upload once, pay per report. Your file and report are automatically deleted after 7 days.
-          </p>
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary">
+              <UserCircle className="h-5 w-5" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium">Continue as guest</p>
+              <p className="text-xs text-muted-foreground">
+                Upload once, pay per report. Files auto-delete after 7 days.
+              </p>
+            </div>
+            <ArrowRight className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+          </button>
         </>
       )}
     </div>

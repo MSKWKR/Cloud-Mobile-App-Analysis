@@ -29,8 +29,8 @@ function App() {
   const handleUpload = () => setRefresh((prev) => prev + 1);
 
   return (
-    <div className="flex items-center justify-center w-screen h-screen bg-gray-900">
-      <div className="flex flex-col items-center space-y-6 p-8 rounded-xl bg-[#1a1a1a] shadow-lg w-[720px]">
+    <div className="min-h-screen w-full flex items-center justify-center bg-gradient-to-br from-[#070b16] via-background to-[#0c1226] p-4">
+      <div className="w-full max-w-[760px] flex flex-col items-center gap-6 rounded-2xl border border-border bg-card p-7 shadow-2xl shadow-black/50">
 
         {/* ── Unauthenticated ─────────────────────────────────────────── */}
         {!user && authMode === "auth" && (

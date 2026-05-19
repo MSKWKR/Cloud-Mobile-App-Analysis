@@ -1,8 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import { sha256 } from "js-sha256";
-import { Card, CardHeader, CardContent, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -17,6 +15,8 @@ import {
   Shield,
   RotateCcw,
   CreditCard,
+  FileSearch,
+  Zap,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -39,20 +39,36 @@ interface GuestJob {
   downloadToken?: string;
 }
 
-// ─── Status icon (mirrors UploadHistory) ─────────────────────────────────────
+// ─── Static config ────────────────────────────────────────────────────────────
+
+const ANALYSIS_OPTIONS: {
+  value: AnalysisType;
+  label: string;
+  desc: string;
+  icon: React.ComponentType<{ className?: string }>;
+}[] = [
+  {
+    value: "static",
+    label: "Static Analysis",
+    desc: "Inspect code, permissions and configuration without running the app.",
+    icon: FileSearch,
+  },
+  {
+    value: "dynamic",
+    label: "Dynamic Analysis",
+    desc: "Run the app in a sandbox to observe live runtime behaviour.",
+    icon: Zap,
+  },
+];
 
 const StatusIcon: React.FC<{ status: JobStatus }> = ({ status }) => {
+  const cls = "h-3.5 w-3.5";
   switch (status) {
-    case "pending":
-      return <Clock className="h-5 w-5 text-yellow-500 animate-pulse" />;
-    case "uploaded":
-      return <CreditCard className="h-5 w-5 text-amber-500" />;
-    case "analyzing":
-      return <Loader2 className="h-5 w-5 text-blue-500 animate-spin" />;
-    case "done":
-      return <CheckCircle className="h-5 w-5 text-green-500" />;
-    case "error":
-      return <AlertCircle className="h-5 w-5 text-red-500" />;
+    case "pending":   return <Clock className={cls} />;
+    case "uploaded":  return <CreditCard className={cls} />;
+    case "analyzing": return <Loader2 className={`${cls} animate-spin`} />;
+    case "done":      return <CheckCircle className={cls} />;
+    case "error":     return <AlertCircle className={cls} />;
   }
 };
 
@@ -62,6 +78,14 @@ const statusLabel: Record<JobStatus, string> = {
   analyzing: "Analyzing…",
   done:      "Done",
   error:     "Error",
+};
+
+const statusPill: Record<JobStatus, string> = {
+  pending:   "bg-yellow-500/15 text-yellow-400",
+  uploaded:  "bg-amber-500/15 text-amber-400",
+  analyzing: "bg-blue-500/15 text-blue-400",
+  done:      "bg-green-500/15 text-green-400",
+  error:     "bg-red-500/15 text-red-400",
 };
 
 // ─── Main component ───────────────────────────────────────────────────────────
@@ -274,192 +298,229 @@ const GuestUploader: React.FC<GuestUploaderProps> = ({ onSwitchToAuth }) => {
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
-    <div className="p-4 flex justify-center">
-      <Card className="w-[720px]">
-        <CardHeader className="pb-2">
-          <div className="flex items-center justify-between">
-            <CardTitle>App Security Analysis</CardTitle>
-            {onSwitchToAuth && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="text-muted-foreground text-xs"
-                onClick={onSwitchToAuth}
-              >
-                Sign in / Register
-              </Button>
+    <div className="w-full space-y-6">
+
+      {/* ── Header ──────────────────────────────────────────────────────── */}
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary/15 ring-1 ring-primary/25">
+            <Shield className="h-5 w-5 text-primary" />
+          </div>
+          <div>
+            <h2 className="text-lg font-semibold leading-tight">App Security Analysis</h2>
+            <p className="text-xs text-muted-foreground">Guest session — no account required</p>
+          </div>
+        </div>
+        {onSwitchToAuth && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-xs text-muted-foreground"
+            onClick={onSwitchToAuth}
+          >
+            Sign in / Register
+          </Button>
+        )}
+      </div>
+
+      <div className="h-px bg-border" />
+
+      {/* ── Idle: file selector ─────────────────────────────────────────── */}
+      {step === "idle" && (
+        <div className="space-y-5">
+          <div className="space-y-3">
+            <p className="text-sm font-medium">Choose analysis type</p>
+            <div className="grid grid-cols-2 gap-3">
+              {ANALYSIS_OPTIONS.map((opt) => {
+                const Icon = opt.icon;
+                const active = analysisType === opt.value;
+                return (
+                  <button
+                    type="button"
+                    key={opt.value}
+                    onClick={() => setAnalysisType(opt.value)}
+                    className={`relative flex flex-col gap-2 rounded-xl border p-4 text-left transition-all
+                      ${active
+                        ? "border-primary bg-primary/10 ring-1 ring-primary/40"
+                        : "border-border bg-muted/20 hover:border-primary/40 hover:bg-muted/40"
+                      }`}
+                  >
+                    <div
+                      className={`flex h-9 w-9 items-center justify-center rounded-lg
+                        ${active ? "bg-primary/20 text-primary" : "bg-muted text-muted-foreground"}`}
+                    >
+                      <Icon className="h-5 w-5" />
+                    </div>
+                    <span className="text-sm font-semibold">{opt.label}</span>
+                    <span className="text-xs leading-snug text-muted-foreground">{opt.desc}</span>
+                    {active && (
+                      <CheckCircle className="absolute right-3 top-3 h-4 w-4 text-primary" />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div
+            onDragOver={onDragOver}
+            onDragLeave={onDragLeave}
+            onDrop={onDrop}
+            onClick={() => document.getElementById("guest-file-upload")?.click()}
+            className={`group flex cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed p-10 transition-all
+              ${isDragOver
+                ? "border-primary bg-primary/10"
+                : "border-border hover:border-primary/50 hover:bg-muted/30"
+              }`}
+          >
+            <div className="flex h-14 w-14 items-center justify-center rounded-full bg-primary/15 ring-1 ring-primary/20 transition-transform group-hover:scale-105">
+              <UploadCloud className="h-7 w-7 text-primary" />
+            </div>
+            <div className="text-center">
+              <p className="text-sm font-medium">Drag & drop your APK or IPA file</p>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                or <span className="font-medium text-primary">browse</span> to choose a file
+              </p>
+            </div>
+            <p className="text-[11px] text-muted-foreground">Max 500 MB · .apk or .ipa</p>
+            <input
+              id="guest-file-upload"
+              type="file"
+              className="hidden"
+              accept=".apk,.ipa"
+              onChange={(e) => e.target.files && handleFile(e.target.files[0])}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* ── Uploading: progress ─────────────────────────────────────────── */}
+      {step === "uploading" && (
+        <div className="flex flex-col items-center gap-5 rounded-xl border border-border bg-muted/20 p-10">
+          <div className="flex h-14 w-14 items-center justify-center rounded-full bg-primary/15 ring-1 ring-primary/20">
+            <UploadCloud className="h-7 w-7 text-primary animate-pulse" />
+          </div>
+          <div className="text-center">
+            <p className="font-medium">
+              {progress < 20 ? "Calculating checksum…" : "Uploading file…"}
+            </p>
+            {file && (
+              <p className="mt-1 flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
+                <FileText className="h-3.5 w-3.5" />
+                <span className="truncate max-w-[320px]">{file.name}</span>
+              </p>
             )}
           </div>
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground mt-1">
-            <Shield className="h-3.5 w-3.5" />
-            <span>Guest session — no account required</span>
+          <div className="w-full space-y-1.5">
+            <Progress value={progress} className="h-2" />
+            <div className="flex justify-between text-[11px] text-muted-foreground">
+              <span className="capitalize">{analysisType} analysis</span>
+              <span>{progress}%</span>
+            </div>
           </div>
-        </CardHeader>
+        </div>
+      )}
 
-        <CardContent className="space-y-6 pt-4">
+      {/* ── Tracking: single job card ───────────────────────────────────── */}
+      {step === "tracking" && (
+        <div className="space-y-4">
 
-          {/* ── Idle: file selector ──────────────────────────────────────── */}
-          {step === "idle" && (
-            <div className="space-y-4">
-              <Label className="mb-2 block">Analysis Type</Label>
-              <div className="flex space-x-4">
-                {(["static", "dynamic"] as AnalysisType[]).map((type) => (
-                  <div
-                    key={type}
-                    className="flex items-center cursor-pointer"
-                    onClick={() => setAnalysisType(type)}
+          {/* Error before job was created */}
+          {errorMsg && !job && (
+            <div className="flex flex-col items-center gap-4 rounded-xl border border-destructive/30 bg-destructive/10 p-10 text-center">
+              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-destructive/15">
+                <AlertTriangle className="h-6 w-6 text-destructive" />
+              </div>
+              <p className="text-sm text-muted-foreground">{errorMsg}</p>
+              <Button variant="outline" size="sm" onClick={reset}>Try again</Button>
+            </div>
+          )}
+
+          {/* Job card */}
+          {job && (
+            <div className="overflow-hidden rounded-xl border border-border">
+              {/* Header */}
+              <div className="flex items-center justify-between gap-3 border-b border-border bg-muted/30 px-4 py-3">
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-background">
+                    <FileText className="h-4 w-4 text-muted-foreground" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium">{job.filename}</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      {new Date(job.uploadTime).toLocaleString()}
+                    </p>
+                  </div>
+                </div>
+                <Badge variant="outline" className="shrink-0 capitalize">
+                  {job.analysisType}
+                </Badge>
+              </div>
+
+              {/* Body */}
+              <div className="space-y-4 px-4 py-4">
+                <div className="flex items-center justify-between gap-3">
+                  <span
+                    className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${statusPill[job.status]}`}
                   >
-                    <span
-                      className={`w-5 h-5 mr-2 rounded-full border-2 flex items-center justify-center
-                        ${analysisType === type
-                          ? "bg-primary border-primary"
-                          : "border-gray-400/50 bg-background hover:border-white transition-colors duration-200"
-                        }`}
-                    >
-                      {analysisType === type && (
-                        <span className="w-2.5 h-2.5 rounded-full bg-white" />
-                      )}
-                    </span>
-                    <Label className="cursor-pointer capitalize">{type}</Label>
-                  </div>
-                ))}
+                    <StatusIcon status={job.status} />
+                    {statusLabel[job.status]}
+                  </span>
+
+                  {(job.status === "pending" || job.status === "analyzing") && (
+                    <Button size="sm" disabled variant="outline">
+                      {job.status === "analyzing"
+                        ? <><Loader2 className="h-4 w-4 animate-spin" />Analyzing…</>
+                        : <><Clock className="h-4 w-4" />Queued</>
+                      }
+                    </Button>
+                  )}
+
+                  {job.status === "uploaded" && (
+                    <Button size="sm" onClick={() => setPayNotice(true)}>
+                      <CreditCard className="h-4 w-4" />
+                      Pay to Analyze
+                    </Button>
+                  )}
+
+                  {job.status === "done" && (
+                    <Button size="sm" onClick={handleDownload}>
+                      <Download className="h-4 w-4" />
+                      Download PDF
+                    </Button>
+                  )}
+
+                  {job.status === "error" && (
+                    <Button size="sm" variant="destructive" onClick={reset}>
+                      <RotateCcw className="h-4 w-4" />
+                      Try Again
+                    </Button>
+                  )}
+                </div>
+
+                {job.status === "uploaded" && (
+                  <p className="rounded-lg bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                    {payNotice
+                      ? "Payment isn't available yet — this feature is coming soon."
+                      : "Your file is uploaded. Complete payment to start the security analysis."}
+                  </p>
+                )}
               </div>
-
-              <div
-                onDragOver={onDragOver}
-                onDragLeave={onDragLeave}
-                onDrop={onDrop}
-                className={`flex flex-col items-center justify-center p-12 border-2 border-dashed rounded-lg cursor-pointer
-                  border-gray-400/50 hover:border-white transition-colors duration-200
-                  ${isDragOver ? "bg-white/10" : ""}`}
-                onClick={() => document.getElementById("guest-file-upload")?.click()}
-              >
-                <UploadCloud className="h-10 w-10 text-muted-foreground mb-4" />
-                <p className="text-muted-foreground text-center">
-                  Drag & drop your APK/IPA file here, or click to select a file.
-                </p>
-                <p className="text-xs text-muted-foreground mt-2">Max 500 MB · .apk or .ipa</p>
-                <input
-                  id="guest-file-upload"
-                  type="file"
-                  className="hidden"
-                  accept=".apk,.ipa"
-                  onChange={(e) => e.target.files && handleFile(e.target.files[0])}
-                />
-              </div>
             </div>
           )}
 
-          {/* ── Uploading: progress ──────────────────────────────────────── */}
-          {step === "uploading" && (
-            <div className="flex flex-col items-center justify-center p-10 border rounded-lg space-y-5">
-              <UploadCloud className="h-10 w-10 text-primary animate-pulse" />
-              <p className="font-medium text-center">
-                {progress < 20 ? "Calculating checksum…" : "Uploading file…"}
-              </p>
-              {file && (
-                <div className="text-sm text-muted-foreground flex items-center gap-2">
-                  <FileText className="h-4 w-4" />
-                  <span>{file.name} · {analysisType}</span>
-                </div>
-              )}
-              <Progress value={progress} className="w-full h-3" />
-              <p className="text-xs text-muted-foreground">{progress}%</p>
+          {/* Offer to start fresh once settled */}
+          {job && (job.status === "uploaded" || job.status === "done" || job.status === "error") && (
+            <div className="flex justify-center pt-1">
+              <Button variant="ghost" size="sm" onClick={reset}>
+                Analyze another file
+              </Button>
             </div>
           )}
 
-          {/* ── Tracking: single job card ────────────────────────────────── */}
-          {step === "tracking" && (
-            <div className="space-y-4">
+        </div>
+      )}
 
-              {/* Error before job was created */}
-              {errorMsg && !job && (
-                <div className="flex flex-col items-center gap-4 p-10 border rounded-lg">
-                  <AlertTriangle className="h-10 w-10 text-yellow-500" />
-                  <p className="text-sm text-muted-foreground text-center">{errorMsg}</p>
-                  <Button variant="outline" onClick={reset}>Try again</Button>
-                </div>
-              )}
-
-              {/* Job card — styled to match UploadHistory rows */}
-              {job && (
-                <div className="border rounded-lg overflow-hidden">
-                  {/* Header */}
-                  <div className="flex items-center justify-between px-4 py-3 bg-muted/30">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <FileText className="h-5 w-5 text-muted-foreground shrink-0" />
-                      <span className="font-medium truncate">{job.filename}</span>
-                      <Badge variant="outline" className="capitalize shrink-0">
-                        {job.analysisType}
-                      </Badge>
-                    </div>
-                    <span className="text-xs text-muted-foreground shrink-0 ml-4">
-                      {new Date(job.uploadTime).toLocaleDateString()}
-                    </span>
-                  </div>
-
-                  {/* Body */}
-                  <div className="px-4 py-4 space-y-4">
-                    <div className="flex items-center gap-2">
-                      <StatusIcon status={job.status} />
-                      <span className="font-medium text-sm">{statusLabel[job.status]}</span>
-                    </div>
-
-                    <div className="flex justify-end">
-                      {(job.status === "pending" || job.status === "analyzing") && (
-                        <Button size="sm" disabled variant="outline">
-                          {job.status === "analyzing"
-                            ? <><Loader2 className="h-4 w-4 mr-1 animate-spin" />Analyzing…</>
-                            : <><Clock className="h-4 w-4 mr-1" />Queued</>
-                          }
-                        </Button>
-                      )}
-
-                      {job.status === "uploaded" && (
-                        <Button size="sm" onClick={() => setPayNotice(true)}>
-                          <CreditCard className="h-4 w-4 mr-1" />
-                          Pay to Analyze
-                        </Button>
-                      )}
-
-                      {job.status === "done" && (
-                        <Button size="sm" onClick={handleDownload}>
-                          <Download className="h-4 w-4 mr-1" />
-                          Download PDF
-                        </Button>
-                      )}
-
-                      {job.status === "error" && (
-                        <Button size="sm" variant="destructive" onClick={reset}>
-                          <RotateCcw className="h-4 w-4 mr-1" />
-                          Try Again
-                        </Button>
-                      )}
-                    </div>
-
-                    {job.status === "uploaded" && payNotice && (
-                      <p className="text-xs text-muted-foreground text-right">
-                        Payment isn't available yet — this feature is coming soon.
-                      </p>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* Offer to start fresh once terminal */}
-              {job && (job.status === "uploaded" || job.status === "done" || job.status === "error") && (
-                <div className="flex justify-center pt-2">
-                  <Button variant="ghost" size="sm" onClick={reset}>
-                    Analyze another file
-                  </Button>
-                </div>
-              )}
-
-            </div>
-          )}
-
-        </CardContent>
-      </Card>
     </div>
   );
 };
