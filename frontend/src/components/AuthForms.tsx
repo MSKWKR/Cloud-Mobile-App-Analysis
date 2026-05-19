@@ -11,6 +11,29 @@ interface AuthFormsProps {
   onContinueAsGuest?: () => void;
 }
 
+/** Maps Firebase auth error codes to messages safe to show the user. */
+const friendlyAuthError = (err: any, mode: "login" | "register"): string => {
+  switch (err?.code) {
+    case "auth/invalid-email":
+    case "auth/user-not-found":
+    case "auth/wrong-password":
+    case "auth/invalid-credential":
+      return "Invalid email or password.";
+    case "auth/email-already-in-use":
+      return "An account with this email already exists.";
+    case "auth/weak-password":
+      return "Password should be at least 6 characters.";
+    case "auth/too-many-requests":
+      return "Too many attempts. Please try again later.";
+    case "auth/network-request-failed":
+      return "Network error. Please check your connection.";
+    default:
+      return mode === "login"
+        ? "Could not sign in. Please try again."
+        : "Could not create your account. Please try again.";
+  }
+};
+
 const AuthForms: React.FC<AuthFormsProps> = ({ onContinueAsGuest }) => {
   const [mode, setMode] = React.useState<"login" | "register">("login");
   const [email, setEmail] = React.useState("");
@@ -49,7 +72,7 @@ const AuthForms: React.FC<AuthFormsProps> = ({ onContinueAsGuest }) => {
       }
       await initializeUser();
     } catch (err: any) {
-      setError(err.message ?? "Authentication failed");
+      setError(friendlyAuthError(err, mode));
     } finally {
       setLoading(false);
     }
