@@ -1,32 +1,10 @@
-/**
- * guest_routes.ts
- *
- * All anonymous guest job routes. No Firebase auth required.
- *
- * Mount in index.ts:
- *   app.post("/guest/stripe-webhook", express.raw({ type: "application/json" }), stripeWebhookHandler);
- *   app.use("/guest", guestRoutes);
- *
- * MongoDB model: GuestJob (see bottom of file)
- *
- * Required packages:
- *   npm install mongoose multer stripe uuid
- *   npm install -D @types/multer @types/uuid
- */
-
-import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 
 import express, { Request, Response, Router } from "express";
 import multer, { FileFilterCallback, StorageEngine } from "multer";
-import Stripe from "stripe";
 import { v4 as uuidv4 } from "uuid";
 import mongoose, { Document, Schema } from "mongoose";
-
-// ─── Stripe ───────────────────────────────────────────────────────────────────
-
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string);
 
 // ─── Mongoose model ───────────────────────────────────────────────────────────
 
@@ -42,11 +20,9 @@ interface IGuestJob extends Document {
   filename: string | null;
   uploadPath: string | null;
   reportPath: string | null;
-  paymentStatus: "pending" | "paid";
   status: JobStatus;
   downloadToken: string | null;
   downloadsRemaining: number;
-  stripeSessionId: string | null;
   createdAt: Date;
   expiresAt: Date;
 }
@@ -55,19 +31,27 @@ const GuestJobSchema = new Schema<IGuestJob>({
   jobId:              { type: String, required: true, unique: true },
   analysisType:       { type: String, enum: ["static", "dynamic"], required: true },
   fileHash:           { type: String, required: true },
-  fileType:           { type: String, enum: ["apk", "ipa"], default: null },
+  fileType:           { type: String, enum: ["apk", "ipa", null], default: null },
   filename:           { type: String, default: null },
   uploadPath:         { type: String, default: null },
   reportPath:         { type: String, default: null },
-  paymentStatus:      { type: String, enum: ["pending", "paid"], default: "pending" },
   status:             { type: String, enum: ["pending", "uploaded", "analyzing", "done", "error", "expired"], default: "pending" },
-  downloadToken:      { type: String, default: null, unique: true, sparse: true },
+  downloadToken:      { type: String, default: null },
   downloadsRemaining: { type: Number, default: 3 },
-  stripeSessionId:    { type: String, default: null },
   expiresAt:          { type: Date, default: () => new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) },
 }, { timestamps: true });
 
+// Unique only across real tokens — jobs awaiting a token (null) are not indexed
+GuestJobSchema.index(
+  { downloadToken: 1 },
+  { unique: true, partialFilterExpression: { downloadToken: { $type: "string" } } }
+);
+
 export const GuestJob = mongoose.model<IGuestJob>("GuestJob", GuestJobSchema);
+
+// Reconcile indexes on startup — drops the stale plain-unique downloadToken index
+// from earlier schema versions so the partial index above replaces it.
+GuestJob.syncIndexes().catch((err) => console.error("GuestJob syncIndexes failed:", err));
 
 // ─── Multer — store uploads outside public folder ─────────────────────────────
 
@@ -92,7 +76,6 @@ const upload = multer({
 
 interface CreateJobBody { analysisType: AnalysisType; hash: string; fileName: string; }
 interface UploadBody    { jobId: string; analysisType: AnalysisType; fileType: FileType; hash: string; }
-interface PayBody       { jobId: string; }
 
 // ─── Router ───────────────────────────────────────────────────────────────────
 
@@ -119,7 +102,6 @@ router.post(
         fileHash: hash,
         filename: fileName,
         status: "pending",
-        paymentStatus: "pending",
       });
 
       res.json({ jobId });
@@ -152,8 +134,8 @@ router.post(
       }
 
       // Rename to include original extension so analysis tools can identify it
-      const ext        = fileType === "ipa" ? ".ipa" : ".apk";
-      const finalPath  = path.join(uploadsDir, `${uuidv4()}${ext}`);
+      const ext       = fileType === "ipa" ? ".ipa" : ".apk";
+      const finalPath = path.join(uploadsDir, `${uuidv4()}${ext}`);
       fs.renameSync(file.path, finalPath);
 
       job.uploadPath = finalPath;
@@ -170,7 +152,6 @@ router.post(
 );
 
 // ─── GET /guest/job-status/:jobId ─────────────────────────────────────────────
-// Polled by the frontend every 3 s. Returns status and download token once done.
 
 router.get(
   "/job-status/:jobId",
@@ -185,7 +166,6 @@ router.get(
 
       res.json({
         status: job.status,
-        // Only expose the token once analysis is complete
         ...(job.status === "done" && job.downloadToken
           ? { downloadToken: job.downloadToken }
           : {}),
@@ -197,55 +177,7 @@ router.get(
   }
 );
 
-// ─── POST /guest/pay ──────────────────────────────────────────────────────────
-// Creates a Stripe Checkout Session and returns the hosted URL.
-
-router.post(
-  "/pay",
-  async (req: Request<{}, {}, PayBody>, res: Response): Promise<void> => {
-    try {
-      const { jobId } = req.body;
-
-      const job = await GuestJob.findOne({ jobId });
-      if (!job) {
-        res.status(404).json({ message: "Job not found." });
-        return;
-      }
-
-      const session = await stripe.checkout.sessions.create({
-        payment_method_types: ["card"],
-        line_items: [
-          {
-            price_data: {
-              currency: "usd",
-              product_data: {
-                name: `App Security Analysis (${job.analysisType})`,
-                description: "One-time security analysis report for your mobile app.",
-              },
-              unit_amount: 2900, // $29.00 — adjust as needed
-            },
-            quantity: 1,
-          },
-        ],
-        mode: "payment",
-        success_url: `${process.env.FRONTEND_URL}/guest/success?jobId=${jobId}`,
-        cancel_url:  `${process.env.FRONTEND_URL}/guest/cancel?jobId=${jobId}`,
-        metadata: { jobId },
-      });
-
-      job.stripeSessionId = session.id;
-      await job.save();
-
-      res.json({ checkoutUrl: session.url });
-    } catch (err) {
-      console.error("pay error:", err);
-      res.status(500).json({ message: "Internal server error." });
-    }
-  }
-);
-
 // ─── GET /guest/report/:token ─────────────────────────────────────────────────
-// Streams the PDF. Validates token, expiry, and download count.
 
 router.get(
   "/report/:token",
@@ -290,53 +222,5 @@ router.get(
     }
   }
 );
-
-// ─── Stripe webhook handler (exported — mounted in index.ts BEFORE express.json()) ──
-
-export const stripeWebhookHandler = async (req: Request, res: Response): Promise<void> => {
-  const sig = req.headers["stripe-signature"];
-
-  if (!sig) {
-    res.status(400).send("Missing Stripe signature.");
-    return;
-  }
-
-  let event: Stripe.Event;
-  try {
-    event = stripe.webhooks.constructEvent(
-      req.body as Buffer,
-      sig,
-      process.env.STRIPE_WEBHOOK_SECRET as string
-    );
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "Unknown error";
-    console.error("Webhook verification failed:", msg);
-    res.status(400).send(`Webhook Error: ${msg}`);
-    return;
-  }
-
-  if (event.type === "checkout.session.completed") {
-    const session = event.data.object as Stripe.Checkout.Session;
-    const jobId   = session.metadata?.jobId;
-
-    if (jobId) {
-      const downloadToken = crypto.randomBytes(32).toString("hex");
-
-      await GuestJob.findOneAndUpdate(
-        { jobId },
-        {
-          paymentStatus: "paid",
-          status:        "paid",
-          downloadToken,
-        }
-      );
-
-      // TODO: enqueue analysis job here, e.g.:
-      // await analysisQueue.add({ jobId });
-    }
-  }
-
-  res.json({ received: true });
-};
 
 export default router;

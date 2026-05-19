@@ -16,6 +16,7 @@ import {
   Download,
   Shield,
   RotateCcw,
+  CreditCard,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -27,7 +28,7 @@ type UploadStep =
   | "uploading"  // Hashing + sending to server
   | "tracking";  // Job created — polling for status
 
-type JobStatus = "pending" | "analyzing" | "done" | "error";
+type JobStatus = "pending" | "uploaded" | "analyzing" | "done" | "error";
 
 interface GuestJob {
   jobId: string;
@@ -44,6 +45,8 @@ const StatusIcon: React.FC<{ status: JobStatus }> = ({ status }) => {
   switch (status) {
     case "pending":
       return <Clock className="h-5 w-5 text-yellow-500 animate-pulse" />;
+    case "uploaded":
+      return <CreditCard className="h-5 w-5 text-amber-500" />;
     case "analyzing":
       return <Loader2 className="h-5 w-5 text-blue-500 animate-spin" />;
     case "done":
@@ -55,6 +58,7 @@ const StatusIcon: React.FC<{ status: JobStatus }> = ({ status }) => {
 
 const statusLabel: Record<JobStatus, string> = {
   pending:   "Pending",
+  uploaded:  "Awaiting payment",
   analyzing: "Analyzing…",
   done:      "Done",
   error:     "Error",
@@ -74,6 +78,7 @@ const GuestUploader: React.FC<GuestUploaderProps> = ({ onSwitchToAuth }) => {
   const [isDragOver, setIsDragOver]     = useState(false);
   const [job, setJob]                   = useState<GuestJob | null>(null);
   const [errorMsg, setErrorMsg]         = useState<string | null>(null);
+  const [payNotice, setPayNotice]       = useState(false);
 
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -89,6 +94,7 @@ const GuestUploader: React.FC<GuestUploaderProps> = ({ onSwitchToAuth }) => {
     setProgress(0);
     setJob(null);
     setErrorMsg(null);
+    setPayNotice(false);
   };
 
   const calculateHash = async (f: File): Promise<string> => {
@@ -115,8 +121,13 @@ const GuestUploader: React.FC<GuestUploaderProps> = ({ onSwitchToAuth }) => {
           prev ? { ...prev, status: data.status, downloadToken: data.downloadToken } : prev
         );
 
-        // Keep polling if not terminal and under attempt limit
-        if (data.status !== "done" && data.status !== "error" && attempts < MAX_ATTEMPTS) {
+        // Stop polling at "uploaded" — nothing advances the job until payment;
+        // also stop on terminal states or the attempt cap.
+        const settled =
+          data.status === "uploaded" ||
+          data.status === "done" ||
+          data.status === "error";
+        if (!settled && attempts < MAX_ATTEMPTS) {
           pollStatus(jobId, attempts + 1);
         }
       } catch {
@@ -211,15 +222,16 @@ const GuestUploader: React.FC<GuestUploaderProps> = ({ onSwitchToAuth }) => {
 
       setProgress(100);
 
-      // Seed the local job, switch to tracking view, start polling
+      // Upload succeeded — job is now "uploaded" and waits for payment
       setJob({
         jobId,
         filename: selectedFile.name,
         analysisType,
-        status: "pending",
+        status: "uploaded",
         uploadTime: new Date().toISOString(),
       });
       setStep("tracking");
+      // Confirm server-side status; polling stops itself once "uploaded"
       pollStatus(jobId);
     },
     [analysisType, pollStatus]
@@ -403,6 +415,13 @@ const GuestUploader: React.FC<GuestUploaderProps> = ({ onSwitchToAuth }) => {
                         </Button>
                       )}
 
+                      {job.status === "uploaded" && (
+                        <Button size="sm" onClick={() => setPayNotice(true)}>
+                          <CreditCard className="h-4 w-4 mr-1" />
+                          Pay to Analyze
+                        </Button>
+                      )}
+
                       {job.status === "done" && (
                         <Button size="sm" onClick={handleDownload}>
                           <Download className="h-4 w-4 mr-1" />
@@ -417,12 +436,18 @@ const GuestUploader: React.FC<GuestUploaderProps> = ({ onSwitchToAuth }) => {
                         </Button>
                       )}
                     </div>
+
+                    {job.status === "uploaded" && payNotice && (
+                      <p className="text-xs text-muted-foreground text-right">
+                        Payment isn't available yet — this feature is coming soon.
+                      </p>
+                    )}
                   </div>
                 </div>
               )}
 
               {/* Offer to start fresh once terminal */}
-              {job && (job.status === "done" || job.status === "error") && (
+              {job && (job.status === "uploaded" || job.status === "done" || job.status === "error") && (
                 <div className="flex justify-center pt-2">
                   <Button variant="ghost" size="sm" onClick={reset}>
                     Analyze another file

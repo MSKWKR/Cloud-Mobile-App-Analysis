@@ -10,6 +10,7 @@ import fs from "fs";
 import cors from "cors";
 import { FileMeta } from "./models/FileMeta";
 import { analyzeIOSStatic, analyzeAndroidStatic, analyzeAndroidDynamic} from "./dispatch";
+import guestRoutes from "./guest_routes";
 
 const PDF_GENERATOR_URL = "http://pdf-generator:15148/api/report";
 
@@ -63,7 +64,10 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization"],
 }));
 app.options("*", cors());
+
 app.use(express.json());
+
+app.use("/guest", guestRoutes);
 
 mongoose.connect("mongodb://cloud-mongodb:27018/local_system")
   .then(() => console.log("MongoDB connected"))
