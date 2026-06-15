@@ -715,9 +715,9 @@ class Writer:
         
         # path detection for JSON files
         if os.path.exists('./Frida/maldroid/android_static_zhtw.json'):
-            android_static_json_zhtw = open('./Frida/maldroid/android_static_zhtw.json', 'r')
+            android_static_json_zhtw = open('android_static_zhtw.json', 'r')
         else:
-            android_static_json_zhtw = open('./Frida/maldroid/android_static_zhtw.json', 'r')
+            android_static_json_zhtw = open('android_static_zhtw.json', 'r')
         
         android_static_dict_zhtw = json.load(android_static_json_zhtw, object_pairs_hook=collections.OrderedDict)
         # en: json
@@ -725,10 +725,10 @@ class Writer:
         #android_static_json_en = open('/home/py/android_static_en.json', 'r')
         
         # path detection for JSON files
-        if os.path.exists('./Frida/maldroid/android_static_en.json'):
-            android_static_json_en = open('./Frida/maldroid/android_static_en.json', 'r')
+        if os.path.exists('android_static_en.json'):
+            android_static_json_en = open('android_static_en.json', 'r')
         else:
-            android_static_json_en = open('./Frida/maldroid/android_static_en.json', 'r')
+            android_static_json_en = open('android_static_en.json', 'r')
         android_static_dict_en = json.load(android_static_json_en, object_pairs_hook=collections.OrderedDict)
         
         # Import lab_num

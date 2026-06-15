@@ -11,4 +11,4 @@ RUN pip3 install -r requirements.txt
 
 EXPOSE 8010
 
-CMD bash -c "bash ./Frida/maldroid/install_requests.sh && python3 ./Frida/maldroid/androguard_server.py"
+CMD bash -c "bash install_requests.sh && python3 androguard_server.py"

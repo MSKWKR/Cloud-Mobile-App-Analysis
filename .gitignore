@@ -1,0 +1,17 @@
+# Python
+*.pyc
+__pycache__/
+
+# APK uploads
+uploads/
+
+# Analysis output
+Reports/
+static_analysis_result/
+test.json
+test_zh.json
+debug.json
+log.txt
+
+# Runtime artifacts
+*.flag
