@@ -122,11 +122,11 @@ export async function analyzeIOSStatic(fileHash: string, analysisType: string = 
 }
 
 
-export async function analyzeAndroidStatic(fileHash: string,  analysisType: string = "static") {
+export async function analyzeAndroidStatic(fileHash: string, analysisType: string = "static") {
   try {
     await connectToMongo();
 
-    const fileDoc = await FileMeta.findOne({ hash: fileHash,  analysisType });
+    const fileDoc = await FileMeta.findOne({ hash: fileHash, analysisType });
     if (!fileDoc) throw new Error(`No file found with hash ${fileHash}`);
     if (fileDoc.analysisType !== "static" || !fileDoc.filename.endsWith(".apk"))
       throw new Error(`File ${fileDoc.filename} is not eligible for APK static analysis`);
@@ -135,38 +135,62 @@ export async function analyzeAndroidStatic(fileHash: string,  analysisType: stri
     if (!fs.existsSync(filePath)) throw new Error(`File does not exist at path ${filePath}`);
 
     const form = new FormData();
-    const fileStream = fs.createReadStream(filePath);
-    form.append("file", fileStream, fileDoc.filename);
+    form.append("file", fs.createReadStream(filePath), fileDoc.filename);
     form.append("hash", fileDoc.hash);
 
     fileDoc.status = "analyzing";
     await fileDoc.save();
 
-    const res = await fetch(`${ANDROID_STATIC_API}/analyze_apk`, { method: "POST", body: form, headers: form.getHeaders() });
+    // Submit job — now returns 202 + job_id immediately
+    const postRes = await fetch(`${ANDROID_STATIC_API}/analyze_apk`, {
+      method: "POST",
+      body: form,
+      headers: form.getHeaders(),
+    });
+    if (postRes.status !== 202) throw new Error(`Enqueue failed with status ${postRes.status}`);
+    const { job_id } = (await postRes.json()) as { job_id: string };
+    if (!job_id) throw new Error("No job_id returned from wrapper");
 
-    if (res.status !== 200) {
-      throw new Error(`Analysis API request failed with status ${res.status}`);
+    fileDoc.taskId = job_id;
+    await fileDoc.save();
+
+    // Poll /status/<job_id> until done
+    let report: any = null;
+    for (let attempt = 1; attempt <= MAX_POLL_ATTEMPTS; attempt++) {
+      console.log(`Polling attempt ${attempt}/${MAX_POLL_ATTEMPTS} for job ${job_id}...`);
+      await sleep(POLL_INTERVAL_MS);
+
+      const statusRes = await fetch(`${ANDROID_STATIC_API}/status/${job_id}`);
+      if (!statusRes.ok) throw new Error(`Status poll failed with ${statusRes.status}`);
+      const data = (await statusRes.json()) as any;
+
+      if (data.status === "pending" || data.status === "running") {
+        console.log(`Job ${job_id} still running — step ${data.step ?? "?"}/${data.total ?? "?"}: ${data.message ?? ""}`);
+        continue;
+      }
+      if (data.status === "success") {
+        report = data.result;
+        console.log(`Job ${job_id} completed successfully`);
+        break;
+      }
+      throw new Error(`Job ${job_id} failed: ${data.error}`);
     }
-    const report = await res.json() as any;
+
+    if (!report) throw new Error(`Job ${job_id} did not complete after ${MAX_POLL_ATTEMPTS} attempts`);
 
     const filename = `${fileDoc.hash}_static.json`;
-    const folder = path.dirname(fileDoc.reportPath);
-    const reportPath = path.join(folder, filename);
-
-    fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+    const reportPath = path.join(path.dirname(fileDoc.reportPath), filename);
+    fs.writeFileSync(reportPath, typeof report === "string" ? report : JSON.stringify(report, null, 2));
     fileDoc.reportPath = reportPath;
     fileDoc.status = "done";
     await fileDoc.save();
 
     return report;
-    
+
   } catch (err) {
     console.error("Error in analyzeAndroidStatic:", err);
     const fileDoc = await FileMeta.findOne({ hash: fileHash });
-    if (fileDoc) {
-      fileDoc.status = "error";
-      await fileDoc.save();
-    }
+    if (fileDoc) { fileDoc.status = "error"; await fileDoc.save(); }
     throw err;
   }
 }
