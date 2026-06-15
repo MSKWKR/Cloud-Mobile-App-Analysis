@@ -1,0 +1,7 @@
+services:
+  pdf-generator:
+    build: .
+    container_name: pdf-generator
+    ports:
+      - "15148:15148"
+    restart: unless-stopped
