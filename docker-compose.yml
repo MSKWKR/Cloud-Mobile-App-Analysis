@@ -5,3 +5,8 @@ services:
     ports:
       - "15148:15148"
     restart: unless-stopped
+
+networks:
+  default:
+    name: app-sso-network
+    external: true
