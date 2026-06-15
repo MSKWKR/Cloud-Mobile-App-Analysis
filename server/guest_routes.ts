@@ -66,11 +66,12 @@ const storage: StorageEngine = multer.diskStorage({
 const upload = multer({
   storage,
   limits: { fileSize: 500 * 1024 * 1024 },
+  defParamCharset: "utf8",
   fileFilter: (_req, file, cb: FileFilterCallback) => {
     const allowed = [".apk", ".ipa"];
     cb(null, allowed.includes(path.extname(file.originalname).toLowerCase()));
   },
-});
+} as any);
 
 // ─── Request body types ───────────────────────────────────────────────────────
 

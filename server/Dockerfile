@@ -8,10 +8,6 @@ RUN npm install
 
 COPY . .
 
-# Build TypeScript to JS
-RUN npx tsc
-
 EXPOSE 3000
 
-# Run compiled JS
-CMD ["node", "dist/index.js"]
+CMD ["npx", "tsx", "index.ts"]

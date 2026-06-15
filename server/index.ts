@@ -79,7 +79,7 @@ const reportsDir = path.join(__dirname, "reports");
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 if (!fs.existsSync(reportsDir)) fs.mkdirSync(reportsDir, { recursive: true });
 
-const upload = multer({ dest: uploadsDir });
+const upload = multer({ dest: uploadsDir, defParamCharset: "utf8" } as any);
 
 // Upload file
 app.post("/upload", verifyToken, upload.single("file"), async (req: AuthRequest, res: Response) => {
