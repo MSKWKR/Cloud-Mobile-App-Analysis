@@ -1,6 +1,11 @@
 version: "3.9"
 
 services:
+  redis:
+    image: redis:7-alpine
+    restart: always
+    container_name: android-static-redis
+
   android-static-backend:
     build: .
     restart: always
@@ -15,8 +20,20 @@ services:
     ports:
       - "5001:5001"
     environment:
-      - ANDROGUARD_API=http://android-static-backend:8010/load_apk
+      - REDIS_URL=redis://redis:6379/0
     depends_on:
+      - redis
+      - android-static-backend
+
+  celery-worker:
+    build: ./queue_wrapper
+    restart: always
+    command: celery -A tasks worker --loglevel=info --concurrency=1
+    environment:
+      - ANDROGUARD_BASE=http://android-static-backend:8010
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
       - android-static-backend
 
 networks:
