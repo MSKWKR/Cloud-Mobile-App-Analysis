@@ -1,4 +1,5 @@
-import admin from "firebase-admin";
+import { initializeApp, cert, ServiceAccount } from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
 import serviceAccount from "./serviceAccountKey.json";
 import { User } from "./models/User";
 import https from "https";
@@ -14,8 +15,8 @@ import guestRoutes from "./guest_routes";
 
 const PDF_GENERATOR_URL = "http://pdf-generator:15148/api/report";
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount as admin.ServiceAccount),
+initializeApp({
+  credential: cert(serviceAccount as ServiceAccount),
 });
 
 interface AuthRequest extends Request {
@@ -33,7 +34,7 @@ const verifyToken = async (req: AuthRequest, res: Response, next: NextFunction) 
   }
 
   try {
-    const decoded = await admin.auth().verifyIdToken(token);
+    const decoded = await getAuth().verifyIdToken(token);
     console.log("Decoded:", decoded);
     console.log("Token verified for uid:", decoded.uid);
     req.user = { uid: decoded.uid, email: decoded.email };
