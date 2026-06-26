@@ -1,7 +1,7 @@
 // src/components/VerifyEmail.tsx
 import * as React from "react";
 import { auth } from "../firebase/config";
-import { resendVerificationEmail } from "../firebase/auth";
+import { resendVerificationEmail, verificationCooldownRemaining } from "../firebase/auth";
 import { Button } from "./ui/button";
 import { MailCheck, Loader2, RefreshCw, AlertCircle, Inbox } from "lucide-react";
 
@@ -19,13 +19,22 @@ const VerifyEmail: React.FC<VerifyEmailProps> = ({ email }) => {
   const [resent, setResent] = React.useState(false);
   const [checking, setChecking] = React.useState(false);
   const [stillUnverified, setStillUnverified] = React.useState(false);
+  const [cooldown, setCooldown] = React.useState<number>(() => verificationCooldownRemaining());
+
+  // Tick the resend cooldown down every second (recomputed from the stored timestamp).
+  React.useEffect(() => {
+    const id = setInterval(() => setCooldown(verificationCooldownRemaining()), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   const handleResend = async () => {
+    if (cooldown > 0) return;
     setSending(true);
     setResent(false);
     try {
       await resendVerificationEmail();
       setResent(true);
+      setCooldown(verificationCooldownRemaining());
     } catch (err) {
       console.error("Resend verification error:", err);
     } finally {
@@ -108,12 +117,19 @@ const VerifyEmail: React.FC<VerifyEmailProps> = ({ email }) => {
           )}
         </Button>
 
-        <Button onClick={handleResend} disabled={sending} variant="outline" className="w-full">
+        <Button
+          onClick={handleResend}
+          disabled={sending || cooldown > 0}
+          variant="outline"
+          className="w-full"
+        >
           {sending ? (
             <>
               <Loader2 className="h-4 w-4 animate-spin" />
               Sending…
             </>
+          ) : cooldown > 0 ? (
+            `Resend available in ${cooldown}s`
           ) : (
             "Resend verification email"
           )}

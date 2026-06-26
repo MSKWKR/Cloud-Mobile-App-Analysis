@@ -8,16 +8,44 @@ import {
 } from "firebase/auth";
 import type { User } from "firebase/auth";
 
+// Rate-limit verification emails. Persisted so the cooldown survives the
+// page reload on "I've verified" and counts the auto-send done at register.
+const VERIFY_SENT_KEY = "verifyEmailLastSent";
+export const VERIFY_COOLDOWN_MS = 60_000;
+
+const markVerificationSent = () => {
+  try {
+    localStorage.setItem(VERIFY_SENT_KEY, Date.now().toString());
+  } catch {
+    /* localStorage unavailable — cooldown just won't persist */
+  }
+};
+
+// Seconds remaining before another verification email may be sent (0 = ready).
+export const verificationCooldownRemaining = (): number => {
+  try {
+    const last = Number(localStorage.getItem(VERIFY_SENT_KEY) || 0);
+    if (!last) return 0;
+    return Math.max(0, Math.ceil((VERIFY_COOLDOWN_MS - (Date.now() - last)) / 1000));
+  } catch {
+    return 0;
+  }
+};
+
 // Sign up, then immediately send a verification email to the new account.
 export const register = async (email: string, password: string) => {
   const cred = await createUserWithEmailAndPassword(auth, email, password);
   await sendEmailVerification(cred.user);
+  markVerificationSent();
   return cred;
 };
 
 // Re-send the verification email to the currently signed-in (unverified) user.
 export const resendVerificationEmail = async () => {
-  if (auth.currentUser) await sendEmailVerification(auth.currentUser);
+  if (auth.currentUser) {
+    await sendEmailVerification(auth.currentUser);
+    markVerificationSent();
+  }
 };
 
 // Login
