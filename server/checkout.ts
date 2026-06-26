@@ -20,6 +20,9 @@ async function requireAuth(
   if (!token) return res.status(401).json({ error: "Unauthorized" });
   try {
     const decoded = await getAuth().verifyIdToken(token);
+    if (!decoded.email_verified) {
+      return res.status(403).json({ error: "email_not_verified" });
+    }
     (req as any).uid = decoded.uid;
     (req as any).email = decoded.email;
     next();

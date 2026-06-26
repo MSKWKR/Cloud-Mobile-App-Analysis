@@ -1,7 +1,6 @@
 // src/components/AuthForms.tsx
 import * as React from "react";
 import { login, register } from "../firebase/auth";
-import { auth } from "../firebase/config";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Shield, Mail, Lock, UserCircle, Loader2, AlertCircle, ArrowRight } from "lucide-react";
@@ -41,24 +40,6 @@ const AuthForms: React.FC<AuthFormsProps> = ({ onContinueAsGuest }) => {
   const [error, setError] = React.useState("");
   const [loading, setLoading] = React.useState(false);
 
-  // Call backend to initialize user document (credits, etc.)
-  const initializeUser = async () => {
-    const token = await auth.currentUser?.getIdToken();
-    if (!token) return;
-
-    try {
-      await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/initUser`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      });
-    } catch (err) {
-      console.error("initUser error:", err);
-    }
-  };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
@@ -66,11 +47,13 @@ const AuthForms: React.FC<AuthFormsProps> = ({ onContinueAsGuest }) => {
 
     try {
       if (mode === "login") {
+        // App gates on emailVerified and runs initUser once verified.
         await login(email, password);
       } else {
+        // register() also sends the verification email; the App then shows
+        // the "verify your email" screen until the user confirms.
         await register(email, password);
       }
-      await initializeUser();
     } catch (err: any) {
       setError(friendlyAuthError(err, mode));
     } finally {

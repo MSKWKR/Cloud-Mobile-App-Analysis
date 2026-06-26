@@ -39,8 +39,11 @@ const verifyToken = async (req: AuthRequest, res: Response, next: NextFunction) 
 
   try {
     const decoded = await getAuth().verifyIdToken(token);
-    console.log("Decoded:", decoded);
     console.log("Token verified for uid:", decoded.uid);
+    if (!decoded.email_verified) {
+      console.log("Rejected: email not verified for uid:", decoded.uid);
+      return res.status(403).json({ error: "email_not_verified" });
+    }
     req.user = { uid: decoded.uid, email: decoded.email };
     next();
   } catch (err) {
