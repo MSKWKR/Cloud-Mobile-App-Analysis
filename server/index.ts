@@ -2,7 +2,6 @@ import { initializeApp, cert, ServiceAccount } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import serviceAccount from "./serviceAccountKey.json";
 import { User } from "./models/User";
-import https from "https";
 import express, { Request, Response, NextFunction } from "express";
 import multer from "multer";
 import mongoose from "mongoose";
@@ -60,8 +59,10 @@ async function consumeCredit(uid: String) {
 }
 
 const app = express();
+// Restrict browser CORS to the configured client origin (falls back to "*" if unset).
+const allowedOrigin = process.env.CLIENT_URL || "*";
 app.use(cors({
-  origin: "*",
+  origin: allowedOrigin,
   methods: ["GET", "POST", "PATCH", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
 }));

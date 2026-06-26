@@ -6,10 +6,12 @@ services:
     build: ./frontend
     restart: 'always'
     container_name: cloud-frontend
+    # Only public-facing service. nginx terminates TLS with the Cloudflare origin cert.
     ports:
-      - "5173:5173"
+      - "80:80"
+      - "443:443"
     volumes:
-      - ./certs:/app/certs:ro
+      - ./certs:/etc/nginx/certs:ro
     networks:
       app-sso-network:
         ipv4_address: 172.27.0.11
@@ -20,13 +22,10 @@ services:
     build: ./server
     restart: 'always'
     container_name: cloud-backend
+    # Internal only — reached via http://cloud-backend:3000 from nginx. Not published.
     networks:
       app-sso-network:
         ipv4_address: 172.27.0.12
-    ports:
-      - "3000:3000"
-    volumes:
-      - ./certs:/app/certs:ro
     depends_on:
       - mongodb
     environment:
@@ -38,8 +37,7 @@ services:
     image: mongo:8.0
     restart: 'always'
     container_name: cloud-mongodb
-    ports:
-      - "27018:27018"
+    # Internal only — not published to the host.
     command: ["--port", "27018"]
     networks:
       app-sso-network:
