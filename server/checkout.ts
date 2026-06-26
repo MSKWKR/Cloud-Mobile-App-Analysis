@@ -4,13 +4,11 @@
 
 import express from "express";
 import Stripe from "stripe";
-import { auth } from "../firebase/admin"; // your Firebase Admin instance
+import { getAuth } from "firebase-admin/auth";
 
 const router = express.Router();
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  apiVersion: "2024-06-20",
-});
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
 
 // Middleware: verify Firebase ID token
 async function requireAuth(
@@ -21,7 +19,7 @@ async function requireAuth(
   const token = req.headers.authorization?.split("Bearer ")[1];
   if (!token) return res.status(401).json({ error: "Unauthorized" });
   try {
-    const decoded = await auth.verifyIdToken(token);
+    const decoded = await getAuth().verifyIdToken(token);
     (req as any).uid = decoded.uid;
     (req as any).email = decoded.email;
     next();
@@ -32,7 +30,7 @@ async function requireAuth(
 
 // POST /api/createCheckoutSession
 router.post("/createCheckoutSession", requireAuth, async (req, res) => {
-  const { packageId, credits, priceInCents } = req.body;
+  const { packageId } = req.body;
   const uid = (req as any).uid as string;
   const email = (req as any).email as string;
 

@@ -12,6 +12,7 @@ import cors from "cors";
 import { FileMeta } from "./models/FileMeta";
 import { analyzeIOSStatic, analyzeAndroidStatic, analyzeAndroidDynamic} from "./dispatch";
 import guestRoutes from "./guest_routes";
+import checkoutRouter from "./checkout";
 
 const PDF_GENERATOR_URL = "http://pdf-generator:15148/api/report";
 
@@ -66,9 +67,12 @@ app.use(cors({
 }));
 app.options("*", cors());
 
+// Webhook must receive raw body — register before express.json()
+app.use("/api/stripeWebhook", express.raw({ type: "application/json" }));
 app.use(express.json());
 
 app.use("/guest", guestRoutes);
+app.use("/api", checkoutRouter);
 
 mongoose.connect("mongodb://cloud-mongodb:27018/local_system")
   .then(() => console.log("MongoDB connected"))

@@ -29,6 +29,10 @@ services:
       - ./certs:/app/certs:ro
     depends_on:
       - mongodb
+    environment:
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
+      - CLIENT_URL=${CLIENT_URL}
 
   mongodb:
     image: mongo:8.0
