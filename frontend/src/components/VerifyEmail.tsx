@@ -3,7 +3,7 @@ import * as React from "react";
 import { auth } from "../firebase/config";
 import { resendVerificationEmail } from "../firebase/auth";
 import { Button } from "./ui/button";
-import { MailCheck, Loader2, RefreshCw, AlertCircle } from "lucide-react";
+import { MailCheck, Loader2, RefreshCw, AlertCircle, Inbox } from "lucide-react";
 
 interface VerifyEmailProps {
   email: string | null;
@@ -67,6 +67,16 @@ const VerifyEmail: React.FC<VerifyEmailProps> = ({ email }) => {
         </div>
       </div>
 
+      {/* Prominent spam-folder notice — verification mail often lands there */}
+      <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5">
+        <Inbox className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-500" />
+        <p className="text-sm text-foreground">
+          <span className="font-medium">Don't see it?</span> The email can take a minute to
+          arrive and often lands in your <span className="font-medium">spam or junk</span>{" "}
+          folder — please check there before resending.
+        </p>
+      </div>
+
       {resent && (
         <div className="flex items-start gap-2 rounded-lg border border-primary/30 bg-primary/10 px-3 py-2.5">
           <MailCheck className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
@@ -115,7 +125,7 @@ const VerifyEmail: React.FC<VerifyEmailProps> = ({ email }) => {
       </div>
 
       <p className="text-center text-xs text-muted-foreground">
-        Didn't get it? Check your spam folder, or resend above.
+        Wrong address? Log out and register again.
       </p>
     </div>
   );
