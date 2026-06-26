@@ -1,0 +1,81 @@
+# =========================================================
+# Secrets / credentials — NEVER commit these
+# =========================================================
+# Environment files (secrets). .env.production is intentionally
+# allowed below since it holds only non-secret build config.
+.env
+.env.local
+.env.*.local
+
+# Firebase admin credentials
+**/serviceAccountKey.json
+
+# TLS / cert material (Cloudflare origin cert, self-signed, etc.)
+certs/
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.keystore
+*.jks
+
+# Allow committing non-secret templates and prod build config
+!.env.example
+!**/.env.example
+!frontend/.env.production
+
+# =========================================================
+# Node / JavaScript / TypeScript
+# =========================================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.tsbuildinfo
+
+# Build output / caches
+dist/
+build/
+out/
+.cache/
+.vite/
+
+# =========================================================
+# Python (android_dynamic_api)
+# =========================================================
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# =========================================================
+# Runtime data (uploaded apps, generated reports, db locks)
+# =========================================================
+uploads/
+reports/
+*.lock
+*.mongod.lock
+
+# =========================================================
+# Logs / temp
+# =========================================================
+*.log
+*.tmp
+*.temp
+*.bak
+
+# =========================================================
+# OS / IDE / Editors
+# =========================================================
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.vscode/
+*.code-workspace
+.idea/
+*.swp
