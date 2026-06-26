@@ -1,5 +1,6 @@
 import { initializeApp, cert, ServiceAccount } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
+import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import serviceAccount from "./serviceAccountKey.json";
 import { User } from "./models/User";
 import express, { Request, Response, NextFunction } from "express";
@@ -18,6 +19,9 @@ const PDF_GENERATOR_URL = "http://pdf-generator:15148/api/report";
 initializeApp({
   credential: cert(serviceAccount as ServiceAccount),
 });
+
+// Firestore is the single source of truth for credit balances (users/{uid}.credits).
+const db = getFirestore();
 
 interface AuthRequest extends Request {
   user?: { uid: string; email?: string };
@@ -45,17 +49,28 @@ const verifyToken = async (req: AuthRequest, res: Response, next: NextFunction) 
   }
 };
 
-async function consumeCredit(uid: String) {
-  const user = await User.findOneAndUpdate(
-    { _id: uid, credits: { $gt: 0 } }, // condition ensures credits > 0
-    { $inc: { credits: -1 } },         // atomic decrement
-    { new: true }
-  );
+// Read the current credit balance from Firestore (0 if the user doc is missing).
+async function getUserCredits(uid: string): Promise<number> {
+  const snap = await db.collection("users").doc(uid).get();
+  return snap.exists ? Number(snap.data()?.credits ?? 0) : 0;
+}
 
-  if (!user) {
+// Atomically decrement one credit, only if the balance is > 0.
+// Runs in a Firestore transaction so concurrent uploads can't double-spend.
+async function consumeCredit(uid: string) {
+  const ref = db.collection("users").doc(uid);
+  const remaining = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const current = snap.exists ? Number(snap.data()?.credits ?? 0) : 0;
+    if (current <= 0) return null; // signal insufficient credits
+    tx.update(ref, { credits: current - 1 });
+    return current - 1;
+  });
+
+  if (remaining === null) {
     return { success: false, error: "no_credits_or_user_not_found" };
   }
-  return { success: true, remainingCredits: user.credits };
+  return { success: true, remainingCredits: remaining };
 }
 
 const app = express();
@@ -115,7 +130,8 @@ app.post("/upload", verifyToken, upload.single("file"), async (req: AuthRequest,
     status: "pending",
   });
 
-  res.json({ message: "File uploaded", meta, remainingCredits: user.credits });
+  const remainingCredits = await getUserCredits(req.user.uid);
+  res.json({ message: "File uploaded", meta, remainingCredits });
 });
 
 // List uploads for each user
@@ -381,11 +397,21 @@ app.post("/api/initUser", verifyToken, async (req: any, res) => {
   const email = req.user.email;
 
   try {
+    // Mongo user record — used for file ownership / email lookups (no credits here).
     let user = await User.findOne({ _id: uid });
     if (!user) {
-      user = await User.create({ _id: uid, email, tokens: 10 });
+      user = await User.create({ _id: uid, email });
     }
-    res.json(user);
+
+    // Firestore holds the credit balance. Seed new users with 10, once.
+    const ref = db.collection("users").doc(uid);
+    const snap = await ref.get();
+    if (!snap.exists) {
+      await ref.set({ email, credits: 10, createdAt: FieldValue.serverTimestamp() });
+    }
+    const credits = snap.exists ? Number(snap.data()?.credits ?? 0) : 10;
+
+    res.json({ uid, email, credits });
   } catch (err) {
     console.error("Init user error:", err);
     res.status(500).json({ error: "Server error" });
@@ -397,7 +423,8 @@ app.get("/api/me", verifyToken, async (req: AuthRequest, res: Response) => {
   try {
     const user = await User.findOne({ _id: req.user.uid });
     if (!user) return res.status(404).json({ error: "User not found" });
-    res.json({ uid: user._id, email: user.email, credits: user.credits });
+    const credits = await getUserCredits(req.user.uid);
+    res.json({ uid: user._id, email: user.email, credits });
   } catch (err) {
     console.error("Get user error:", err);
     res.status(500).json({ error: "Server error" });
@@ -408,10 +435,8 @@ app.get("/api/getCredits", verifyToken, async (req: AuthRequest, res: Response) 
   if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
   try {
-    const user = await User.findById(req.user.uid);
-    if (!user) return res.status(404).json({ error: "User not found" });
-
-    return res.json({ credits: user.credits ?? 0 });
+    const credits = await getUserCredits(req.user.uid);
+    return res.json({ credits });
   } catch (err) {
     console.error("Get credits error:", err);
     return res.status(500).json({ error: "Server error" });

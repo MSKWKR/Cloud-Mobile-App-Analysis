@@ -109,12 +109,14 @@ router.post(
         return res.sendStatus(400);
       }
 
-      // Atomically increment credits in Firestore
+      // Atomically increment credits in Firestore (source of truth).
+      // set+merge so it still works if the user doc doesn't exist yet.
       const { getFirestore, FieldValue } = await import("firebase-admin/firestore");
       const db = getFirestore();
-      await db.collection("users").doc(uid).update({
-        credits: FieldValue.increment(Number(credits)),
-      });
+      await db.collection("users").doc(uid).set(
+        { credits: FieldValue.increment(Number(credits)) },
+        { merge: true }
+      );
 
       console.log(`Credited ${credits} to user ${uid}`);
     }
