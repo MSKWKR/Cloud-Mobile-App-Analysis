@@ -1,9 +1,9 @@
 import mongoose from "mongoose";
-import path from "path";
 import fs from "fs";
 import FormData from "form-data";
 import fetch from "node-fetch";
 import { FileMeta } from "./models/FileMeta";
+import { downloadToTemp, putJson } from "./s3";
 import crypto from "crypto";
 
 const MONGO_URL = "mongodb://cloud-mongodb:27018/local_system";
@@ -33,6 +33,7 @@ async function connectToMongo() {
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 export async function analyzeIOSStatic(fileHash: string, analysisType: string = "static") {
+  let tmpPath: string | null = null;
   try {
     await connectToMongo();
 
@@ -42,12 +43,13 @@ export async function analyzeIOSStatic(fileHash: string, analysisType: string = 
     if (fileDoc.analysisType !== "static" || !fileDoc.filename.endsWith(".ipa"))
       throw new Error(`File ${fileDoc.filename} is not eligible for IPA static analysis`);
 
-    const filePath = path.resolve(fileDoc.filePath);
-    if (!fs.existsSync(filePath)) throw new Error(`File does not exist at path ${filePath}`);
+    // Download the sample from S3 to a local temp file so form-data can send a
+    // known Content-Length to the analysis wrapper.
+    tmpPath = await downloadToTemp(fileDoc.filePath);
 
     // Prepare file upload
-    const fileStream = fs.createReadStream(filePath);
-    const md5Hash = crypto.createHash("md5").update(fs.readFileSync(filePath)).digest("hex");
+    const fileStream = fs.createReadStream(tmpPath);
+    const md5Hash = crypto.createHash("md5").update(fs.readFileSync(tmpPath)).digest("hex");
 
     const form = new FormData();
     form.append("app_filename", fileDoc.filename);
@@ -98,13 +100,8 @@ export async function analyzeIOSStatic(fileHash: string, analysisType: string = 
       throw new Error(`Task ${taskId} did not complete after ${MAX_POLL_ATTEMPTS} attempts`);
     }
 
-    // Save report and update status
-    const filename = `${fileDoc.hash}_static.json`;
-    const folder = path.dirname(fileDoc.reportPath);
-    const reportPath = path.join(folder, filename);
-
-    fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
-    fileDoc.reportPath = reportPath;
+    // Save report to S3 (reportPath key was set at upload time) and update status
+    await putJson(fileDoc.reportPath, report);
     fileDoc.status = "done";
     await fileDoc.save();
 
@@ -118,11 +115,14 @@ export async function analyzeIOSStatic(fileHash: string, analysisType: string = 
       await fileDoc.save();
     }
     throw err;
+  } finally {
+    if (tmpPath) await fs.promises.unlink(tmpPath).catch(() => {});
   }
 }
 
 
 export async function analyzeAndroidStatic(fileHash: string, analysisType: string = "static") {
+  let tmpPath: string | null = null;
   try {
     await connectToMongo();
 
@@ -131,11 +131,10 @@ export async function analyzeAndroidStatic(fileHash: string, analysisType: strin
     if (fileDoc.analysisType !== "static" || !fileDoc.filename.endsWith(".apk"))
       throw new Error(`File ${fileDoc.filename} is not eligible for APK static analysis`);
 
-    const filePath = path.resolve(fileDoc.filePath);
-    if (!fs.existsSync(filePath)) throw new Error(`File does not exist at path ${filePath}`);
+    tmpPath = await downloadToTemp(fileDoc.filePath);
 
     const form = new FormData();
-    form.append("file", fs.createReadStream(filePath), fileDoc.filename);
+    form.append("file", fs.createReadStream(tmpPath), fileDoc.filename);
     form.append("hash", fileDoc.hash);
 
     fileDoc.status = "analyzing";
@@ -178,10 +177,9 @@ export async function analyzeAndroidStatic(fileHash: string, analysisType: strin
 
     if (!report) throw new Error(`Job ${job_id} did not complete after ${MAX_POLL_ATTEMPTS} attempts`);
 
-    const filename = `${fileDoc.hash}_static.json`;
-    const reportPath = path.join(path.dirname(fileDoc.reportPath), filename);
-    fs.writeFileSync(reportPath, typeof report === "string" ? report : JSON.stringify(report, null, 2));
-    fileDoc.reportPath = reportPath;
+    // Wrapper may return the report as a JSON string or an object — store parsed JSON.
+    const parsedReport = typeof report === "string" ? JSON.parse(report) : report;
+    await putJson(fileDoc.reportPath, parsedReport);
     fileDoc.status = "done";
     await fileDoc.save();
 
@@ -192,10 +190,13 @@ export async function analyzeAndroidStatic(fileHash: string, analysisType: strin
     const fileDoc = await FileMeta.findOne({ hash: fileHash });
     if (fileDoc) { fileDoc.status = "error"; await fileDoc.save(); }
     throw err;
+  } finally {
+    if (tmpPath) await fs.promises.unlink(tmpPath).catch(() => {});
   }
 }
 
 export async function analyzeAndroidDynamic(fileHash: string, analysisType: string = "dynamic") {
+  let tmpPath: string | null = null;
   try {
     await connectToMongo();
 
@@ -204,11 +205,10 @@ export async function analyzeAndroidDynamic(fileHash: string, analysisType: stri
     if (fileDoc.analysisType !== "dynamic" || !fileDoc.filename.endsWith(".apk"))
       throw new Error(`File ${fileDoc.filename} is not eligible for APK dynamic analysis`);
 
-    const filePath = path.resolve(fileDoc.filePath);
-    if (!fs.existsSync(filePath)) throw new Error(`File does not exist at path ${filePath}`);
-    
+    tmpPath = await downloadToTemp(fileDoc.filePath);
+
     const form = new FormData();
-    const fileStream = fs.createReadStream(filePath);
+    const fileStream = fs.createReadStream(tmpPath);
     form.append("file", fileStream, fileDoc.filename);
     form.append("hash", fileDoc.hash);
 
@@ -223,12 +223,7 @@ export async function analyzeAndroidDynamic(fileHash: string, analysisType: stri
       }
       const result = await res.json() as any;
 
-      const filename = `${fileDoc.hash}_dynamic.json`;
-      const folder = path.dirname(fileDoc.reportPath);
-      const reportPath = path.join(folder, filename);
-
-      fs.writeFileSync(reportPath, JSON.stringify(result, null, 2));
-      fileDoc.reportPath = reportPath;
+      await putJson(fileDoc.reportPath, result);
       fileDoc.status = "done";
       await fileDoc.save();
 
@@ -239,7 +234,7 @@ export async function analyzeAndroidDynamic(fileHash: string, analysisType: stri
       await fileDoc.save();
       throw err;
     }
-    
+
   } catch (err) {
     console.error("Error in analyzeAndroidDynamic:", err);
     const fileDoc = await FileMeta.findOne({ hash: fileHash });
@@ -248,6 +243,8 @@ export async function analyzeAndroidDynamic(fileHash: string, analysisType: stri
       await fileDoc.save();
     }
     throw err;
+  } finally {
+    if (tmpPath) await fs.promises.unlink(tmpPath).catch(() => {});
   }
 }
 

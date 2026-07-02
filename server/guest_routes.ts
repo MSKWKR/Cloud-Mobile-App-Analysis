@@ -1,10 +1,12 @@
 import fs from "fs";
+import os from "os";
 import path from "path";
 
 import express, { Request, Response, Router } from "express";
 import multer, { FileFilterCallback, StorageEngine } from "multer";
 import { v4 as uuidv4 } from "uuid";
 import mongoose, { Document, Schema } from "mongoose";
+import { putFile, getStream } from "./s3";
 
 // ─── Mongoose model ───────────────────────────────────────────────────────────
 
@@ -53,15 +55,16 @@ export const GuestJob = mongoose.model<IGuestJob>("GuestJob", GuestJobSchema);
 // from earlier schema versions so the partial index above replaces it.
 GuestJob.syncIndexes().catch((err) => console.error("GuestJob syncIndexes failed:", err));
 
-// ─── Multer — store uploads outside public folder ─────────────────────────────
-
-const uploadsDir = path.join(__dirname, "guest-uploads");
-if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+// ─── Multer — buffer uploads to a temp dir, then stream to S3 ──────────────────
 
 const storage: StorageEngine = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, uploadsDir),
+  destination: (_req, _file, cb) => cb(null, os.tmpdir()),
   filename:    (_req, _file, cb) => cb(null, uuidv4()),
 });
+
+// S3 key schemes for the guest flow.
+const guestUploadKey = (jobId: string, ext: string) => `guest/uploads/${jobId}${ext}`;
+const guestReportKey = (jobId: string) => `guest/reports/${jobId}.pdf`;
 
 const upload = multer({
   storage,
@@ -134,12 +137,13 @@ router.post(
         return;
       }
 
-      // Rename to include original extension so analysis tools can identify it
-      const ext       = fileType === "ipa" ? ".ipa" : ".apk";
-      const finalPath = path.join(uploadsDir, `${uuidv4()}${ext}`);
-      fs.renameSync(file.path, finalPath);
+      // Include original extension in the key so analysis tools can identify it
+      const ext = fileType === "ipa" ? ".ipa" : ".apk";
+      const key = guestUploadKey(job.jobId, ext);
+      await putFile(key, file.path);
+      await fs.promises.unlink(file.path).catch(() => {});
 
-      job.uploadPath = finalPath;
+      job.uploadPath = key;
       job.fileType   = fileType;
       job.status     = "uploaded";
       await job.save();
@@ -206,7 +210,17 @@ router.get(
         return;
       }
 
-      if (!job.reportPath || !fs.existsSync(job.reportPath)) {
+      if (!job.reportPath) {
+        res.status(500).json({ message: "Report file missing." });
+        return;
+      }
+
+      // Fetch from S3 first so a missing object doesn't consume a download.
+      let stream;
+      try {
+        stream = await getStream(job.reportPath);
+      } catch (e) {
+        console.error("guest report fetch error:", e);
         res.status(500).json({ message: "Report file missing." });
         return;
       }
@@ -216,7 +230,11 @@ router.get(
 
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader("Content-Disposition", `attachment; filename="security-report-${job.jobId}.pdf"`);
-      fs.createReadStream(job.reportPath).pipe(res);
+      stream.on("error", (err) => {
+        console.error("guest report stream error:", err);
+        if (!res.headersSent) res.status(500).json({ message: "Report file missing." });
+      });
+      stream.pipe(res);
     } catch (err) {
       console.error("report download error:", err);
       res.status(500).json({ message: "Internal server error." });

@@ -6,10 +6,11 @@ import { User } from "./models/User";
 import express, { Request, Response, NextFunction } from "express";
 import multer from "multer";
 import mongoose from "mongoose";
-import path from "path";
 import fs from "fs";
+import os from "os";
 import cors from "cors";
 import { FileMeta } from "./models/FileMeta";
+import { putFile, putJson, getJson } from "./s3";
 import { analyzeIOSStatic, analyzeAndroidStatic, analyzeAndroidDynamic} from "./dispatch";
 import guestRoutes from "./guest_routes";
 import checkoutRouter from "./checkout";
@@ -97,12 +98,15 @@ mongoose.connect("mongodb://cloud-mongodb:27018/local_system")
   .then(() => console.log("MongoDB connected"))
   .catch((err) => console.error(err));
 
-const uploadsDir = path.join(__dirname, "uploads");
-const reportsDir = path.join(__dirname, "reports");
-if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-if (!fs.existsSync(reportsDir)) fs.mkdirSync(reportsDir, { recursive: true });
+// Multer buffers the incoming upload to a local temp file; we then stream it to S3
+// and delete the temp file. S3 is the durable store — no local uploads/reports dirs.
+const upload = multer({ dest: os.tmpdir(), defParamCharset: "utf8" } as any);
 
-const upload = multer({ dest: uploadsDir, defParamCharset: "utf8" } as any);
+// S3 key schemes. These strings are stored in FileMeta.filePath / .reportPath.
+const uploadKey = (uid: string, hash: string, filename: string) =>
+  `uploads/${uid}/${hash}/${filename}`;
+const reportKey = (uid: string, hash: string, analysisType: string) =>
+  `reports/${uid}/${hash}/${analysisType}.json`;
 
 // Upload file
 app.post("/upload", verifyToken, upload.single("file"), async (req: AuthRequest, res: Response) => {
@@ -116,18 +120,21 @@ app.post("/upload", verifyToken, upload.single("file"), async (req: AuthRequest,
   const user = await User.findOne({ _id: req.user.uid });
   if (!user) return res.status(401).json({ message: "User not found" });
 
-  // Generate unique file path per user + hash
+  // Generate unique S3 keys per user + hash
   const sanitizedFilename = file.originalname.replace(/\s+/g, "_"); // optional: sanitize spaces
-  const newFilePath = path.join(uploadsDir, `${user._id}_${hash}_${sanitizedFilename}`);
-  const reportPath = path.join(reportsDir, `${user._id}_${hash}_${type}.json`);
-  fs.renameSync(file.path, newFilePath);
-  fs.writeFileSync(reportPath, JSON.stringify({ status: "pending" }, null, 2));
+  const filePath = uploadKey(String(user._id), hash, sanitizedFilename);
+  const reportPath = reportKey(String(user._id), hash, type);
+
+  // Stream the temp upload to S3, then remove the local temp file.
+  await putFile(filePath, file.path);
+  await fs.promises.unlink(file.path).catch(() => {});
+  await putJson(reportPath, { status: "pending" });
 
   const meta = await FileMeta.create({
     user: user._id, // <-- associate file with user
     filename: file.originalname,
     analysisType: type,
-    filePath: newFilePath,
+    filePath,
     reportPath,
     hash,
     status: "pending",
@@ -165,10 +172,6 @@ app.get("/uploads", verifyToken, async (req: AuthRequest, res: Response) => {
   res.json(sanitized);
 });
 
-// Serve files (if needed)
-app.use("/uploads", express.static(uploadsDir));
-
-
 // Check for duplicate file
 app.post("/check-hash", verifyToken, async (req: AuthRequest, res: Response) => {
   console.log("Received request at /check-hash"); // Add this log for debugging
@@ -200,8 +203,9 @@ app.post("/check-hash", verifyToken, async (req: AuthRequest, res: Response) => 
         message: "File with same hash and analysis type already exists",
       });
     } else {
-      const reportPath = path.join(reportsDir, `${user._id}_${hash}_${analysisType}.json`);
-      // Create a new entry in db with different analysis type
+      const reportPath = reportKey(String(user._id), hash, analysisType);
+      // Create a new entry in db with different analysis type. Reuses the same
+      // uploaded binary (file.filePath) — only the report artifact differs.
       const meta = await FileMeta.create({
         user: user._id, // <-- associate file with user
         filename: file.filename,
@@ -211,7 +215,7 @@ app.post("/check-hash", verifyToken, async (req: AuthRequest, res: Response) => 
         hash,
         status: "pending",
       });
-      fs.writeFileSync(reportPath, JSON.stringify({ status: "pending" }, null, 2));
+      await putJson(reportPath, { status: "pending" });
 
       return res.json({
         status: "reuse",
@@ -346,10 +350,13 @@ app.post("/generate-report", verifyToken, async (req: AuthRequest, res: Response
     const reportMeta = await FileMeta.findOne({ hash, analysisType: type, user: user._id });
     if (!reportMeta) return res.status(404).json({ error: "Report not found" });
 
-    if (!fs.existsSync(reportMeta.reportPath)) {
+    let reportData;
+    try {
+      reportData = await getJson(reportMeta.reportPath);
+    } catch (e) {
+      console.error("Report fetch from S3 failed:", e);
       return res.status(404).json({ error: "Report file missing" });
     }
-    const reportData = JSON.parse(fs.readFileSync(reportMeta.reportPath, "utf-8"));
 
     const pdfRes = await fetch(PDF_GENERATOR_URL, {
       method: "POST",
