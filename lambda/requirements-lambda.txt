@@ -1,0 +1,4 @@
+# Extra deps for the Lambda container image (on top of ../requirements.txt).
+awslambdaric==2.0.11
+boto3==1.34.144
+requests==2.32.0
