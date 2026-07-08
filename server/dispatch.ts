@@ -8,7 +8,11 @@ import crypto from "crypto";
 
 const MONGO_URL = "mongodb://cloud-mongodb:27018/local_system";
 const IOS_STATIC_API = "http://ios-static-backend:8080";
-const ANDROID_STATIC_API = "http://android-static-wrapper:5001";
+// Android static analysis now runs on an AWS Lambda behind a Function URL (auth: NONE).
+// Point ANDROID_STATIC_API at that URL, e.g.
+// https://xxxx.lambda-url.ap-southeast-2.on.aws — trailing slash is stripped so the
+// `${ANDROID_STATIC_API}/analyze_apk` path joins cleanly.
+const ANDROID_STATIC_API = (process.env.ANDROID_STATIC_API ?? "").replace(/\/+$/, "");
 const ANDROID_DYNAMIC_API = "http://android-dynamic-wrapper:5002";
 
 const POLL_INTERVAL_MS = 5000;
@@ -122,7 +126,6 @@ export async function analyzeIOSStatic(fileHash: string, analysisType: string = 
 
 
 export async function analyzeAndroidStatic(fileHash: string, analysisType: string = "static") {
-  let tmpPath: string | null = null;
   try {
     await connectToMongo();
 
@@ -131,20 +134,19 @@ export async function analyzeAndroidStatic(fileHash: string, analysisType: strin
     if (fileDoc.analysisType !== "static" || !fileDoc.filename.endsWith(".apk"))
       throw new Error(`File ${fileDoc.filename} is not eligible for APK static analysis`);
 
-    tmpPath = await downloadToTemp(fileDoc.filePath);
-
-    const form = new FormData();
-    form.append("file", fs.createReadStream(tmpPath), fileDoc.filename);
-    form.append("hash", fileDoc.hash);
-
     fileDoc.status = "analyzing";
     await fileDoc.save();
 
-    // Submit job — now returns 202 + job_id immediately
+    // Submit job — the Lambda pulls the APK from S3 itself, so we send the object key
+    // (fileDoc.filePath) as JSON instead of uploading the bytes. Returns 202 + job_id.
     const postRes = await fetch(`${ANDROID_STATIC_API}/analyze_apk`, {
       method: "POST",
-      body: form,
-      headers: form.getHeaders(),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        key: fileDoc.filePath,
+        hash: fileDoc.hash,
+        filename: fileDoc.filename,
+      }),
     });
     if (postRes.status !== 202) throw new Error(`Enqueue failed with status ${postRes.status}`);
     const { job_id } = (await postRes.json()) as { job_id: string };
@@ -190,8 +192,6 @@ export async function analyzeAndroidStatic(fileHash: string, analysisType: strin
     const fileDoc = await FileMeta.findOne({ hash: fileHash });
     if (fileDoc) { fileDoc.status = "error"; await fileDoc.save(); }
     throw err;
-  } finally {
-    if (tmpPath) await fs.promises.unlink(tmpPath).catch(() => {});
   }
 }
 

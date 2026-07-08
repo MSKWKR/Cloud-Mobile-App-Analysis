@@ -37,6 +37,8 @@ services:
       - S3_BUCKET=${S3_BUCKET}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      # Android static analysis — AWS Lambda Function URL (auth: NONE)
+      - ANDROID_STATIC_API=${ANDROID_STATIC_API}
 
   mongodb:
     image: mongo:8.0
