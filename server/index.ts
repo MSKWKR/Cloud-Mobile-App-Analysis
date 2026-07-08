@@ -378,7 +378,7 @@ app.post("/generate-report", verifyToken, async (req: AuthRequest, res: Response
   }
 });
 
-app.patch("/retry", async (req: AuthRequest, res: Response) => {
+app.patch("/retry", verifyToken, async (req: AuthRequest, res: Response) => {
   if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
   const { hash, type } = req.body;
