@@ -49,8 +49,8 @@ def create_pending(job_id, file_hash, filename):
 def set_running(job_id, step, total, message):
     _table.update_item(
         Key={"job_id": job_id},
-        UpdateExpression="SET #s=:s, step=:step, total=:total, message=:msg, updated_at=:u",
-        ExpressionAttributeNames={"#s": "status"},
+        UpdateExpression="SET #s=:s, step=:step, #t=:total, #m=:msg, updated_at=:u",
+        ExpressionAttributeNames={"#s": "status", "#t": "total", "#m": "message"},
         ExpressionAttributeValues={
             ":s": "running",
             ":step": step,

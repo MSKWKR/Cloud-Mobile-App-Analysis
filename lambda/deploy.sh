@@ -5,7 +5,7 @@
 set -euo pipefail
 
 # ---- config (override via env) --------------------------------------------
-: "${AWS_REGION:=ap-northeast-1}"
+: "${AWS_REGION:=ap-southeast-2}"
 : "${ACCOUNT_ID:=$(aws sts get-caller-identity --query Account --output text)}"
 : "${ECR_REPO:=android-static}"
 : "${IMAGE_TAG:=latest}"
@@ -14,7 +14,7 @@ set -euo pipefail
 : "${JOB_TABLE:=android-static-jobs}"
 : "${WORKER_FN:=android-static-worker}"
 : "${API_FN:=android-static-api}"
-: "${WORKER_MEMORY:=4096}"
+: "${WORKER_MEMORY:=3008}"
 : "${WORKER_TIMEOUT:=600}"
 : "${WORKER_EPHEMERAL:=2048}"               # /tmp size (MB): APK + reports
 : "${FUNCTION_URL_AUTH:=AWS_IAM}"           # AWS_IAM (recommended) or NONE
@@ -30,8 +30,11 @@ aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS_REGI
   || aws ecr create-repository --repository-name "$ECR_REPO" --region "$AWS_REGION" >/dev/null
 aws ecr get-login-password --region "$AWS_REGION" \
   | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-docker build -f lambda/Dockerfile -t "$IMAGE_URI" .
-docker push "$IMAGE_URI"
+# Lambda only accepts a single-platform image manifest with NO provenance/SBOM
+# attestations. Docker's containerd/BuildKit store adds those by default (which
+# yields an unsupported manifest index), so build with buildx and disable them.
+docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
+  -f lambda/Dockerfile -t "$IMAGE_URI" --push .
 
 # ---- 2. DynamoDB job table (TTL on "ttl") ---------------------------------
 if ! aws dynamodb describe-table --table-name "$JOB_TABLE" --region "$AWS_REGION" >/dev/null 2>&1; then
@@ -109,9 +112,15 @@ deploy_fn "$API_FN" "$API_ROLE" "api_handler.handler" \
 aws lambda create-function-url-config --function-name "$API_FN" --region "$AWS_REGION" \
   --auth-type "$FUNCTION_URL_AUTH" >/dev/null 2>&1 || true
 if [ "$FUNCTION_URL_AUTH" = "NONE" ]; then
+  # Since Oct 2025, public Function URLs need BOTH lambda:InvokeFunctionUrl and
+  # lambda:InvokeFunction (scoped to URL calls) — missing either yields 403.
+  # https://docs.aws.amazon.com/lambda/latest/dg/urls-auth.html
   aws lambda add-permission --function-name "$API_FN" --region "$AWS_REGION" \
     --statement-id FunctionURLAllowPublic --action lambda:InvokeFunctionUrl \
     --principal "*" --function-url-auth-type NONE >/dev/null 2>&1 || true
+  aws lambda add-permission --function-name "$API_FN" --region "$AWS_REGION" \
+    --statement-id FunctionURLAllowPublicInvokeFunction --action lambda:InvokeFunction \
+    --principal "*" --invoked-via-function-url >/dev/null 2>&1 || true
 fi
 URL=$(aws lambda get-function-url-config --function-name "$API_FN" --region "$AWS_REGION" --query FunctionUrl --output text)
 
