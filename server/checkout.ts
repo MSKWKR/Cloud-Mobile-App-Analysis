@@ -38,11 +38,13 @@ router.post("/createCheckoutSession", requireAuth, async (req, res) => {
   const email = (req as any).email as string;
 
   // Basic validation — always re-validate server-side, never trust client price
+  // 1 credit = 1 upload = USD 30, matching the advertised price on /product.
+  // Must stay in sync with CREDIT_PACKAGES in frontend BuyCredits.tsx.
   const VALID_PACKAGES: Record<string, { credits: number; price: number }> = {
-    starter:    { credits: 100,  price: 500 },
-    pro:        { credits: 500,  price: 2000 },
-    power:      { credits: 1500, price: 5000 },
-    enterprise: { credits: 5000, price: 15000 },
+    starter:    { credits: 1,  price: 3000 },
+    pro:        { credits: 5,  price: 15000 },
+    power:      { credits: 10, price: 30000 },
+    enterprise: { credits: 25, price: 75000 },
   };
 
   const pkg = VALID_PACKAGES[packageId];

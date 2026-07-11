@@ -11,11 +11,13 @@ interface CreditPackage {
   popular?: boolean;
 }
 
+// 1 credit = 1 upload = USD 30, matching the advertised price on /product.
+// Must stay in sync with VALID_PACKAGES in server/checkout.ts.
 const CREDIT_PACKAGES: CreditPackage[] = [
-  { id: "starter", credits: 100, price: 500, label: "Starter" },
-  { id: "pro", credits: 500, price: 2000, label: "Pro", popular: true },
-  { id: "power", credits: 1500, price: 5000, label: "Power" },
-  { id: "enterprise", credits: 5000, price: 15000, label: "Enterprise" },
+  { id: "starter", credits: 1, price: 3000, label: "Starter" },
+  { id: "pro", credits: 5, price: 15000, label: "Pro", popular: true },
+  { id: "power", credits: 10, price: 30000, label: "Power" },
+  { id: "enterprise", credits: 25, price: 75000, label: "Enterprise" },
 ];
 
 interface BuyCreditsProps {
@@ -33,7 +35,7 @@ const BuyCredits: React.FC<BuyCreditsProps> = ({ currentCredits = 0, onBack }) =
     `$${(cents / 100).toFixed(2)}`;
 
   const pricePerCredit = (pkg: CreditPackage) =>
-    ((pkg.price / pkg.credits) / 100).toFixed(3);
+    ((pkg.price / pkg.credits) / 100).toFixed(2);
 
   const handlePurchase = async () => {
     const pkg = CREDIT_PACKAGES.find((p) => p.id === selected);
