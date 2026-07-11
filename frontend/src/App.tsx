@@ -7,6 +7,7 @@ import GuestUploader from "./components/GuestUploader";
 import VerifyEmail from "./components/VerifyEmail";
 import UploadHistory from "./components/UploadHistory";
 import UserCredits from "./components/UserCredits";
+import { Link } from "react-router-dom";
 import { onUserStateChanged } from "./firebase/auth";
 import { auth } from "./firebase/config";
 import type { User } from "firebase/auth";
@@ -109,6 +110,22 @@ function App() {
             <UploadHistory refreshSignal={refresh} />
           </>
         )}
+
+        {/* ── Company / contact footer (required merchant disclosure) ──── */}
+        <footer className="w-full border-t border-border pt-4 text-center text-sm text-muted-foreground">
+          <Link to="/product" className="text-primary hover:underline">
+            Product Introduction &amp; Pricing
+          </Link>
+          <p className="mt-1">
+            SUPREMA TECHNOLOGIES LTD ·{" "}
+            <a
+              href="mailto:suprematechnologiesltd@gmail.com"
+              className="hover:underline"
+            >
+              suprematechnologiesltd@gmail.com
+            </a>
+          </p>
+        </footer>
 
       </div>
     </div>
