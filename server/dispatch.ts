@@ -1,4 +1,3 @@
-import mongoose from "mongoose";
 import fs from "fs";
 import FormData from "form-data";
 import fetch from "node-fetch";
@@ -6,7 +5,6 @@ import { FileMeta } from "./models/FileMeta";
 import { downloadToTemp, putJson } from "./s3";
 import crypto from "crypto";
 
-const MONGO_URL = "mongodb://cloud-mongodb:27018/local_system";
 const IOS_STATIC_API = "http://ios-static-backend:8080";
 // Android static analysis now runs on an AWS Lambda behind a Function URL (auth: NONE).
 // Point ANDROID_STATIC_API at that URL, e.g.
@@ -16,7 +14,9 @@ const ANDROID_STATIC_API = (process.env.ANDROID_STATIC_API ?? "").replace(/\/+$/
 const ANDROID_DYNAMIC_API = "http://android-dynamic-wrapper:5002";
 
 const POLL_INTERVAL_MS = 5000;
-const MAX_POLL_ATTEMPTS = 60;
+// Must outlast the android-static worker Lambda (600s timeout + async retries):
+// 180 × 5s = 15 min. The iOS wrapper shares this budget.
+const MAX_POLL_ATTEMPTS = 180;
 
 interface TaskQueuedResponse {
   task_id: string;
@@ -27,22 +27,13 @@ interface ScanReport {
   [key: string]: any;
 }
 
-async function connectToMongo() {
-  if (mongoose.connection.readyState === 0) {
-    await mongoose.connect(MONGO_URL);
-    console.log("MongoDB connected");
-  }
-}
-
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 export async function analyzeIOSStatic(fileHash: string, analysisType: string = "static") {
   let tmpPath: string | null = null;
   try {
-    await connectToMongo();
-
     // Fetch the file document
-    const fileDoc = await FileMeta.findOne({ hash: fileHash, analysisType });
+    const fileDoc = FileMeta.findOne({ hash: fileHash, analysisType });
     if (!fileDoc) throw new Error(`No file found with hash ${fileHash}`);
     if (fileDoc.analysisType !== "static" || !fileDoc.filename.endsWith(".ipa"))
       throw new Error(`File ${fileDoc.filename} is not eligible for IPA static analysis`);
@@ -68,9 +59,7 @@ export async function analyzeIOSStatic(fileHash: string, analysisType: string = 
     if (!taskId) throw new Error("No task_id returned from analysis API");
 
     // Save initial status
-    fileDoc.status = "analyzing";
-    fileDoc.taskId = taskId;
-    await fileDoc.save();
+    FileMeta.update(fileDoc.id, { status: "analyzing", taskId });
 
     // Poll GET /scan/{task_id} until report is ready
     let report: ScanReport | null = null;
@@ -106,18 +95,14 @@ export async function analyzeIOSStatic(fileHash: string, analysisType: string = 
 
     // Save report to S3 (reportPath key was set at upload time) and update status
     await putJson(fileDoc.reportPath, report);
-    fileDoc.status = "done";
-    await fileDoc.save();
+    FileMeta.update(fileDoc.id, { status: "done" });
 
     return report;
 
   } catch (err) {
     console.error("Error in analyzeIOSStatic:", err);
-    const fileDoc = await FileMeta.findOne({ hash: fileHash });
-    if (fileDoc) {
-      fileDoc.status = "error";
-      await fileDoc.save();
-    }
+    const fileDoc = FileMeta.findOne({ hash: fileHash });
+    if (fileDoc) FileMeta.update(fileDoc.id, { status: "error" });
     throw err;
   } finally {
     if (tmpPath) await fs.promises.unlink(tmpPath).catch(() => {});
@@ -127,15 +112,12 @@ export async function analyzeIOSStatic(fileHash: string, analysisType: string = 
 
 export async function analyzeAndroidStatic(fileHash: string, analysisType: string = "static") {
   try {
-    await connectToMongo();
-
-    const fileDoc = await FileMeta.findOne({ hash: fileHash, analysisType });
+    const fileDoc = FileMeta.findOne({ hash: fileHash, analysisType });
     if (!fileDoc) throw new Error(`No file found with hash ${fileHash}`);
     if (fileDoc.analysisType !== "static" || !fileDoc.filename.endsWith(".apk"))
       throw new Error(`File ${fileDoc.filename} is not eligible for APK static analysis`);
 
-    fileDoc.status = "analyzing";
-    await fileDoc.save();
+    FileMeta.update(fileDoc.id, { status: "analyzing" });
 
     // Submit job — the Lambda pulls the APK from S3 itself, so we send the object key
     // (fileDoc.filePath) as JSON instead of uploading the bytes. Returns 202 + job_id.
@@ -152,8 +134,7 @@ export async function analyzeAndroidStatic(fileHash: string, analysisType: strin
     const { job_id } = (await postRes.json()) as { job_id: string };
     if (!job_id) throw new Error("No job_id returned from wrapper");
 
-    fileDoc.taskId = job_id;
-    await fileDoc.save();
+    FileMeta.update(fileDoc.id, { taskId: job_id });
 
     // Poll /status/<job_id> until done
     let report: any = null;
@@ -162,8 +143,13 @@ export async function analyzeAndroidStatic(fileHash: string, analysisType: strin
       await sleep(POLL_INTERVAL_MS);
 
       const statusRes = await fetch(`${ANDROID_STATIC_API}/status/${job_id}`);
-      if (!statusRes.ok) throw new Error(`Status poll failed with ${statusRes.status}`);
-      const data = (await statusRes.json()) as any;
+      // Failed jobs come back as HTTP 500 with {status:"failed", error} — surface
+      // the real reason instead of a bare status code.
+      const data = (await statusRes.json().catch(() => null)) as any;
+      if (!statusRes.ok) {
+        throw new Error(`Job ${job_id} failed: ${data?.error ?? `status poll returned ${statusRes.status}`}`);
+      }
+      if (!data) throw new Error(`Status poll for ${job_id} returned invalid JSON`);
 
       if (data.status === "pending" || data.status === "running") {
         console.log(`Job ${job_id} still running — step ${data.step ?? "?"}/${data.total ?? "?"}: ${data.message ?? ""}`);
@@ -182,15 +168,14 @@ export async function analyzeAndroidStatic(fileHash: string, analysisType: strin
     // Wrapper may return the report as a JSON string or an object — store parsed JSON.
     const parsedReport = typeof report === "string" ? JSON.parse(report) : report;
     await putJson(fileDoc.reportPath, parsedReport);
-    fileDoc.status = "done";
-    await fileDoc.save();
+    FileMeta.update(fileDoc.id, { status: "done" });
 
     return report;
 
   } catch (err) {
     console.error("Error in analyzeAndroidStatic:", err);
-    const fileDoc = await FileMeta.findOne({ hash: fileHash });
-    if (fileDoc) { fileDoc.status = "error"; await fileDoc.save(); }
+    const fileDoc = FileMeta.findOne({ hash: fileHash });
+    if (fileDoc) FileMeta.update(fileDoc.id, { status: "error" });
     throw err;
   }
 }
@@ -198,9 +183,7 @@ export async function analyzeAndroidStatic(fileHash: string, analysisType: strin
 export async function analyzeAndroidDynamic(fileHash: string, analysisType: string = "dynamic") {
   let tmpPath: string | null = null;
   try {
-    await connectToMongo();
-
-    const fileDoc = await FileMeta.findOne({ hash: fileHash, analysisType });
+    const fileDoc = FileMeta.findOne({ hash: fileHash, analysisType });
     if (!fileDoc) throw new Error(`No file found with hash ${fileHash}`);
     if (fileDoc.analysisType !== "dynamic" || !fileDoc.filename.endsWith(".apk"))
       throw new Error(`File ${fileDoc.filename} is not eligible for APK dynamic analysis`);
@@ -213,8 +196,7 @@ export async function analyzeAndroidDynamic(fileHash: string, analysisType: stri
     form.append("hash", fileDoc.hash);
 
     try {
-      fileDoc.status = "analyzing";
-      await fileDoc.save();
+      FileMeta.update(fileDoc.id, { status: "analyzing" });
 
       // Call the wrapper
       const res = await fetch(`${ANDROID_DYNAMIC_API}/analyze_dynamic`, { method: "POST", body: form, headers: form.getHeaders() });
@@ -224,24 +206,19 @@ export async function analyzeAndroidDynamic(fileHash: string, analysisType: stri
       const result = await res.json() as any;
 
       await putJson(fileDoc.reportPath, result);
-      fileDoc.status = "done";
-      await fileDoc.save();
+      FileMeta.update(fileDoc.id, { status: "done" });
 
       return result;
     } catch (err) {
       console.error("Error during dynamic analysis request:", err);
-      fileDoc.status = "error";
-      await fileDoc.save();
+      FileMeta.update(fileDoc.id, { status: "error" });
       throw err;
     }
 
   } catch (err) {
     console.error("Error in analyzeAndroidDynamic:", err);
-    const fileDoc = await FileMeta.findOne({ hash: fileHash });
-    if (fileDoc) {
-      fileDoc.status = "error";
-      await fileDoc.save();
-    }
+    const fileDoc = FileMeta.findOne({ hash: fileHash });
+    if (fileDoc) FileMeta.update(fileDoc.id, { status: "error" });
     throw err;
   } finally {
     if (tmpPath) await fs.promises.unlink(tmpPath).catch(() => {});

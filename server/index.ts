@@ -5,7 +5,6 @@ import serviceAccount from "./serviceAccountKey.json";
 import { User } from "./models/User";
 import express, { Request, Response, NextFunction } from "express";
 import multer from "multer";
-import mongoose from "mongoose";
 import fs from "fs";
 import os from "os";
 import cors from "cors";
@@ -94,10 +93,6 @@ app.use(express.json());
 app.use("/guest", guestRoutes);
 app.use("/api", checkoutRouter);
 
-mongoose.connect("mongodb://cloud-mongodb:27018/local_system")
-  .then(() => console.log("MongoDB connected"))
-  .catch((err) => console.error(err));
-
 // Multer buffers the incoming upload to a local temp file; we then stream it to S3
 // and delete the temp file. S3 is the durable store — no local uploads/reports dirs.
 const upload = multer({ dest: os.tmpdir(), defParamCharset: "utf8" } as any);
@@ -117,21 +112,21 @@ app.post("/upload", verifyToken, upload.single("file"), async (req: AuthRequest,
   if (!file || !type || !hash) return res.status(400).json({ message: "Missing fields" });
 
   // Find user document
-  const user = await User.findOne({ _id: req.user.uid });
+  const user = User.findById(req.user.uid);
   if (!user) return res.status(401).json({ message: "User not found" });
 
   // Generate unique S3 keys per user + hash
   const sanitizedFilename = file.originalname.replace(/\s+/g, "_"); // optional: sanitize spaces
-  const filePath = uploadKey(String(user._id), hash, sanitizedFilename);
-  const reportPath = reportKey(String(user._id), hash, type);
+  const filePath = uploadKey(String(user.id), hash, sanitizedFilename);
+  const reportPath = reportKey(String(user.id), hash, type);
 
   // Stream the temp upload to S3, then remove the local temp file.
   await putFile(filePath, file.path);
   await fs.promises.unlink(file.path).catch(() => {});
   await putJson(reportPath, { status: "pending" });
 
-  const meta = await FileMeta.create({
-    user: user._id, // <-- associate file with user
+  const meta = FileMeta.create({
+    user: user.id, // <-- associate file with user
     filename: file.originalname,
     analysisType: type,
     filePath,
@@ -150,7 +145,7 @@ app.get("/uploads", verifyToken, async (req: AuthRequest, res: Response) => {
 
   console.log("User UID from request:", req.user.uid); // Log UID from the request
 
-  const user = await User.findOne({ _id: req.user.uid }); // Find the user based on the Firebase UID
+  const user = User.findById(req.user.uid); // Find the user based on the Firebase UID
   if (!user) {
     console.error("User not found for UID:", req.user.uid); // Log if user is not found
     return res.status(401).json({ error: "User not found" });
@@ -158,9 +153,9 @@ app.get("/uploads", verifyToken, async (req: AuthRequest, res: Response) => {
 
   console.log("User found:", user);
 
-  const uploads = await FileMeta.find({ user: user._id }).sort({ uploadTime: -1 }); // Use ObjectId reference to find files
+  const uploads = FileMeta.find({ user: user.id }); // Already sorted by uploadTime DESC
   const sanitized = uploads.map(u => ({
-    id: u._id.toString(),
+    id: String(u.id),
     filename: u.filename,
     hash: u.hash,
     analysisType: u.analysisType,
@@ -186,13 +181,13 @@ app.post("/check-hash", verifyToken, async (req: AuthRequest, res: Response) => 
   }
 
   try {
-    const user = await User.findOne({ _id: req.user.uid });
+    const user = User.findById(req.user.uid);
     if (!user) {
       return res.status(401).json({ error: "User not found" });
     }
 
-    console.log("Checking for user ID:", user._id); // Log the user ID being checked
-    const file = await FileMeta.findOne({ hash, user: user._id });
+    console.log("Checking for user ID:", user.id); // Log the user ID being checked
+    const file = FileMeta.findOne({ hash, user: user.id });
     if (!file) {
       return res.json({ status: "new "});
     }
@@ -203,11 +198,11 @@ app.post("/check-hash", verifyToken, async (req: AuthRequest, res: Response) => 
         message: "File with same hash and analysis type already exists",
       });
     } else {
-      const reportPath = reportKey(String(user._id), hash, analysisType);
+      const reportPath = reportKey(String(user.id), hash, analysisType);
       // Create a new entry in db with different analysis type. Reuses the same
       // uploaded binary (file.filePath) — only the report artifact differs.
-      const meta = await FileMeta.create({
-        user: user._id, // <-- associate file with user
+      const meta = FileMeta.create({
+        user: user.id, // <-- associate file with user
         filename: file.filename,
         analysisType,
         filePath: file.filePath,
@@ -236,10 +231,10 @@ app.post("/ios-static-analyze", verifyToken, async (req: AuthRequest, res: Respo
   if (!hash) return res.status(400).json({ error: "Missing hash" });
 
     // Find the current user
-  const user = await User.findOne({ _id: req.user.uid });
+  const user = User.findById(req.user.uid);
   if (!user) return res.status(401).json({ error: "User not found" });
 
-  const upload = await FileMeta.findOne({ user:user._id, hash, analysisType: "static" });
+  const upload = FileMeta.findOne({ user:user.id, hash, analysisType: "static" });
   if (!upload) return res.status(404).json({ error: "Upload not found" });
   if (!(upload.filename.endsWith(".ipa") && upload.analysisType === "static"))
     return res.status(400).json({ error: "Not eligible for analysis" });
@@ -250,16 +245,11 @@ app.post("/ios-static-analyze", verifyToken, async (req: AuthRequest, res: Respo
     .then(() => console.log("iOS Static Analysis completed"))
     .catch(err => {
       console.error("iOS Static Analysis Error:", err);
-      FileMeta.findOne({ user: user._id, hash }).then(doc => {
-        if (doc) {
-          doc.status = "error";
-          doc.save();
-        }
-      });
+      const doc = FileMeta.findOne({ user: user.id, hash });
+      if (doc) FileMeta.update(doc.id, { status: "error" });
     });
 
-  upload.status = "analyzing";
-  await upload.save();
+  FileMeta.update(upload.id, { status: "analyzing" });
 
   res.json({ message: "Analysis triggered" });
 });
@@ -271,10 +261,10 @@ app.post("/android-static-analyze", verifyToken, async (req: AuthRequest, res: R
   if (!hash) return res.status(400).json({ error: "Missing hash" });
 
     // Find the current user
-  const user = await User.findOne({ _id: req.user.uid });
+  const user = User.findById(req.user.uid);
   if (!user) return res.status(401).json({ error: "User not found" });
 
-  const upload = await FileMeta.findOne({ user: user._id, hash, analysisType: "static" });
+  const upload = FileMeta.findOne({ user: user.id, hash, analysisType: "static" });
   if (!upload) return res.status(404).json({ error: "Upload not found" });
   if (!(upload.filename.endsWith(".apk") && upload.analysisType === "static"))
     return res.status(400).json({ error: "Not eligible for analysis" });
@@ -285,16 +275,11 @@ app.post("/android-static-analyze", verifyToken, async (req: AuthRequest, res: R
     .then(() => console.log("Android Static Analysis completed"))
     .catch(err => {
       console.error("Android Static Analysis Error:", err);
-      FileMeta.findOne({ user: user._id, hash }).then(doc => {
-        if (doc) {
-          doc.status = "error";
-          doc.save();
-        }
-      });
+      const doc = FileMeta.findOne({ user: user.id, hash });
+      if (doc) FileMeta.update(doc.id, { status: "error" });
     });
 
-  upload.status = "analyzing";
-  await upload.save();
+  FileMeta.update(upload.id, { status: "analyzing" });
 
   res.json({ message: "Analysis triggered" });
 });
@@ -307,10 +292,10 @@ app.post("/android-dynamic-analyze", verifyToken, async (req: AuthRequest, res: 
   if (!hash) return res.status(400).json({ error: "Missing hash" });
 
     // Find the current user
-  const user = await User.findOne({ _id: req.user.uid });
+  const user = User.findById(req.user.uid);
   if (!user) return res.status(401).json({ error: "User not found" });
 
-  const upload = await FileMeta.findOne({ user:user._id, hash, analysisType: "dynamic" });
+  const upload = FileMeta.findOne({ user:user.id, hash, analysisType: "dynamic" });
   if (!upload) return res.status(404).json({ error: "Upload not found" });
   if (!(upload.filename.endsWith(".apk") && upload.analysisType === "dynamic"))
     return res.status(400).json({ error: "Not eligible for analysis" });
@@ -321,16 +306,11 @@ app.post("/android-dynamic-analyze", verifyToken, async (req: AuthRequest, res: 
     .then(() => console.log("Android Dynamic Analysis completed"))
     .catch(err => {
       console.error("Android Dynamic Analysis Error:", err);
-      FileMeta.findOne({ user:user._id, hash }).then(doc => {
-        if (doc) {
-          doc.status = "error";
-          doc.save();
-        }
-      });
+      const doc = FileMeta.findOne({ user: user.id, hash });
+      if (doc) FileMeta.update(doc.id, { status: "error" });
     });
 
-  upload.status = "analyzing";
-  await upload.save();
+  FileMeta.update(upload.id, { status: "analyzing" });
 
   res.json({ message: "Analysis triggered" });
 });
@@ -343,11 +323,11 @@ app.post("/generate-report", verifyToken, async (req: AuthRequest, res: Response
   if (!hash || !type) return res.status(400).json({ error: "Missing fields" });
 
   // Find the current user
-  const user = await User.findOne({ _id: req.user.uid });
+  const user = User.findById(req.user.uid);
   if (!user) return res.status(401).json({ error: "User not found" });
 
   try {
-    const reportMeta = await FileMeta.findOne({ hash, analysisType: type, user: user._id });
+    const reportMeta = FileMeta.findOne({ hash, analysisType: type, user: user.id });
     if (!reportMeta) return res.status(404).json({ error: "Report not found" });
 
     let reportData;
@@ -385,15 +365,14 @@ app.patch("/retry", verifyToken, async (req: AuthRequest, res: Response) => {
   if (!hash || !type) return res.status(400).json({ error: "Missing fields" });
 
     // Find the current user
-  const user = await User.findOne({ _id: req.user.uid });
+  const user = User.findById(req.user.uid);
   if (!user) return res.status(401).json({ error: "User not found" });
 
   try {
-    const fileDoc = await FileMeta.findOne({ hash, analysisType: type, user: user._id });
+    const fileDoc = FileMeta.findOne({ hash, analysisType: type, user: user.id });
     if (!fileDoc) return res.status(404).json({ error: "File not found" });
 
-    fileDoc.status = "pending";
-    await fileDoc.save();
+    FileMeta.update(fileDoc.id, { status: "pending" });
 
     res.json({ message: "File reset to pending" });
   } catch (err) {
@@ -407,10 +386,10 @@ app.post("/api/initUser", verifyToken, async (req: any, res) => {
   const email = req.user.email;
 
   try {
-    // Mongo user record — used for file ownership / email lookups (no credits here).
-    let user = await User.findOne({ _id: uid });
+    // SQLite user record — used for file ownership / email lookups (no credits here).
+    let user = User.findById(uid);
     if (!user) {
-      user = await User.create({ _id: uid, email });
+      user = User.create(uid, email);
     }
 
     // Firestore holds the credit balance. Seed new users with 10, once.
@@ -431,10 +410,10 @@ app.post("/api/initUser", verifyToken, async (req: any, res) => {
 app.get("/api/me", verifyToken, async (req: AuthRequest, res: Response) => {
   if (!req.user) return res.status(401).json({ error: "Unauthorized" });
   try {
-    const user = await User.findOne({ _id: req.user.uid });
+    const user = User.findById(req.user.uid);
     if (!user) return res.status(404).json({ error: "User not found" });
     const credits = await getUserCredits(req.user.uid);
-    res.json({ uid: user._id, email: user.email, credits });
+    res.json({ uid: user.id, email: user.email, credits });
   } catch (err) {
     console.error("Get user error:", err);
     res.status(500).json({ error: "Server error" });

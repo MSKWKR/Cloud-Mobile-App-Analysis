@@ -1,5 +1,5 @@
 // Central S3 helper. All file bytes (uploaded binaries + report artifacts) live in
-// S3; MongoDB keeps only the object keys (in the existing filePath/reportPath/uploadPath
+// S3; SQLite keeps only the object keys (in the existing filePath/reportPath/uploadPath
 // fields). Credentials (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) are read from the
 // environment automatically by the SDK; region + bucket are read explicitly here.
 

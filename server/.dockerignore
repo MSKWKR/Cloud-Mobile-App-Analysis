@@ -1,0 +1,6 @@
+# Never copy host node_modules into the image — better-sqlite3 is a native module
+# compiled per-platform; the image must use its own `npm install` output (alpine/musl).
+node_modules
+# Local SQLite database — lives in a named volume in Docker, not in the image.
+data
+dist

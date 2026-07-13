@@ -1,0 +1,56 @@
+import Database from "better-sqlite3";
+import fs from "fs";
+import path from "path";
+
+// Single-file SQLite database. The data/ dir must be a mounted volume in Docker
+// so the DB survives container rebuilds (see docker-compose.yml).
+const DB_PATH = process.env.SQLITE_PATH ?? path.join(__dirname, "data", "cmaa.db");
+
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+
+export const db = new Database(DB_PATH);
+db.pragma("journal_mode = WAL");
+db.pragma("foreign_keys = ON");
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id    TEXT PRIMARY KEY,   -- Firebase uid
+    email TEXT NOT NULL
+    -- Credit balance lives in Firestore (users/{uid}.credits) — not stored here.
+  );
+
+  CREATE TABLE IF NOT EXISTS file_meta (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user         TEXT NOT NULL REFERENCES users(id),
+    filename     TEXT NOT NULL,
+    analysisType TEXT NOT NULL,
+    filePath     TEXT NOT NULL,   -- S3 key of the uploaded binary
+    reportPath   TEXT NOT NULL,   -- S3 key of the analysis report
+    hash         TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'pending'
+                 CHECK (status IN ('pending','analyzing','done','error')),
+    taskId       TEXT,
+    uploadTime   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (user, hash, analysisType)
+  );
+
+  CREATE TABLE IF NOT EXISTS guest_jobs (
+    jobId              TEXT PRIMARY KEY,
+    analysisType       TEXT NOT NULL CHECK (analysisType IN ('static','dynamic')),
+    fileHash           TEXT NOT NULL,
+    fileType           TEXT CHECK (fileType IN ('apk','ipa')),
+    filename           TEXT,
+    uploadPath         TEXT,      -- S3 key of the uploaded binary
+    reportPath         TEXT,      -- S3 key of the PDF report
+    status             TEXT NOT NULL DEFAULT 'pending'
+                       CHECK (status IN ('pending','uploaded','analyzing','done','error','expired')),
+    downloadToken      TEXT,
+    downloadsRemaining INTEGER NOT NULL DEFAULT 3,
+    createdAt          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    expiresAt          TEXT NOT NULL
+  );
+
+  -- Unique only across real tokens — jobs awaiting a token (NULL) are not indexed.
+  CREATE UNIQUE INDEX IF NOT EXISTS guest_jobs_downloadToken
+    ON guest_jobs (downloadToken) WHERE downloadToken IS NOT NULL;
+`);

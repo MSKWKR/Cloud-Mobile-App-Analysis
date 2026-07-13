@@ -1,9 +1,21 @@
-import mongoose from "mongoose";
+import { db } from "../db";
 
-const UserSchema = new mongoose.Schema({
-  _id: { type: String, required: true }, // Use Firebase uid as _id
-  email: { type: String, required: true },
+export interface UserRow {
+  id: string; // Firebase uid
+  email: string;
   // Credit balance lives in Firestore (users/{uid}.credits) — not stored here.
-});
+}
 
-export const User = mongoose.model("User", UserSchema);
+const findByIdStmt = db.prepare("SELECT * FROM users WHERE id = ?");
+const insertStmt = db.prepare("INSERT INTO users (id, email) VALUES (?, ?)");
+
+export const User = {
+  findById(id: string): UserRow | undefined {
+    return findByIdStmt.get(id) as UserRow | undefined;
+  },
+
+  create(id: string, email: string): UserRow {
+    insertStmt.run(id, email);
+    return { id, email };
+  },
+};

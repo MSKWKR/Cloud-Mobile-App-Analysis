@@ -1,30 +1,68 @@
-import mongoose, { Schema, Document } from "mongoose";
+import { db } from "../db";
 
-export interface FileMeta extends Document {
-  user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+export type FileStatus = "pending" | "analyzing" | "done" | "error";
+
+export interface FileMetaRow {
+  id: number;
+  user: string; // users.id (Firebase uid)
   filename: string;
   analysisType: string;
   filePath: string;
   reportPath: string;
   hash: string;
-  status: "pending" | "analyzing" | "done" | "error";
-  taskId?: string;
-  uploadTime?: Date;
+  status: FileStatus;
+  taskId: string | null;
+  uploadTime: string; // ISO 8601
 }
 
-const FileMetaSchema = new Schema<FileMeta>({
-  user: { type: String, required: true },
-  filename: { type: String, required: true },
-  analysisType: { type: String, required: true },
-  filePath: { type: String, required: true },
-  reportPath: { type: String, required: true },
-  hash: { type: String, required: true },
-  status: { type: String, default: "pending", enum: ["pending", "analyzing", "done", "error"] },
-  taskId: { type: String },
-  uploadTime: { type: Date, default: Date.now },
-});
+type Filter = Partial<Pick<FileMetaRow, "user" | "hash" | "analysisType">>;
 
-// Optionally keep the compound index, but now per-user too
-FileMetaSchema.index({ user: 1, hash: 1, analysisType: 1 }, { unique: true });
+function where(filter: Filter): { sql: string; values: unknown[] } {
+  const keys = Object.keys(filter) as (keyof Filter)[];
+  return {
+    sql: keys.map((k) => `${k} = ?`).join(" AND "),
+    values: keys.map((k) => filter[k]),
+  };
+}
 
-export const FileMeta = mongoose.model<FileMeta>("FileMeta", FileMetaSchema);
+const insertStmt = db.prepare(`
+  INSERT INTO file_meta (user, filename, analysisType, filePath, reportPath, hash, status)
+  VALUES (@user, @filename, @analysisType, @filePath, @reportPath, @hash, @status)
+`);
+const findByIdStmt = db.prepare("SELECT * FROM file_meta WHERE id = ?");
+
+export const FileMeta = {
+  create(data: {
+    user: string;
+    filename: string;
+    analysisType: string;
+    filePath: string;
+    reportPath: string;
+    hash: string;
+    status?: FileStatus;
+  }): FileMetaRow {
+    const info = insertStmt.run({ status: "pending", ...data });
+    return findByIdStmt.get(info.lastInsertRowid) as FileMetaRow;
+  },
+
+  findOne(filter: Filter): FileMetaRow | undefined {
+    const { sql, values } = where(filter);
+    return db
+      .prepare(`SELECT * FROM file_meta WHERE ${sql} LIMIT 1`)
+      .get(...values) as FileMetaRow | undefined;
+  },
+
+  find(filter: Filter): FileMetaRow[] {
+    const { sql, values } = where(filter);
+    return db
+      .prepare(`SELECT * FROM file_meta WHERE ${sql} ORDER BY uploadTime DESC, id DESC`)
+      .all(...values) as FileMetaRow[];
+  },
+
+  update(id: number, patch: Partial<Pick<FileMetaRow, "status" | "taskId">>): void {
+    const keys = Object.keys(patch) as (keyof typeof patch)[];
+    if (keys.length === 0) return;
+    db.prepare(`UPDATE file_meta SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE id = ?`)
+      .run(...keys.map((k) => patch[k]), id);
+  },
+};
