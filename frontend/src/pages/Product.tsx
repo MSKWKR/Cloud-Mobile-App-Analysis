@@ -99,7 +99,7 @@ function Product() {
           <div className="flex items-center gap-2">
             <ThemeToggle />
             <Button asChild>
-              <Link to="/">Go to Platform</Link>
+              <Link to="/app">Go to Platform</Link>
             </Button>
           </div>
         </header>
@@ -204,7 +204,7 @@ function Product() {
               APK file with a downloadable PDF security report.
             </p>
             <Button asChild className="w-full">
-              <Link to="/">Get Started</Link>
+              <Link to="/app">Get Started</Link>
             </Button>
           </div>
         </section>

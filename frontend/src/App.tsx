@@ -113,7 +113,7 @@ function App() {
 
         {/* ── Company / contact footer (required merchant disclosure) ──── */}
         <footer className="w-full border-t border-border pt-4 text-center text-sm text-muted-foreground">
-          <Link to="/product" className="text-primary hover:underline">
+          <Link to="/" className="text-primary hover:underline">
             Product Introduction &amp; Pricing
           </Link>
           <p className="mt-1">
