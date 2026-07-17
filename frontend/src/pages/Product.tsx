@@ -196,16 +196,44 @@ function Product() {
           <div className="mx-auto w-full max-w-sm rounded-xl border border-border bg-card p-8 text-center">
             <h3 className="font-semibold text-foreground">Application Analysis</h3>
             <div className="my-4">
-              <span className="text-5xl font-bold text-foreground">USD 30</span>
+              <span className="text-5xl font-bold text-foreground">NT$900</span>
               <span className="text-muted-foreground"> / upload</span>
+              <div className="text-muted-foreground mt-1">≈ USD 30</div>
             </div>
             <p className="text-sm text-muted-foreground mb-6">
               Each upload includes full static and dynamic analysis of one IPA or
-              APK file with a downloadable PDF security report.
+              APK file with a downloadable PDF security report. All payments are
+              charged in New Taiwan Dollars (TWD); the USD price is shown for
+              reference only.
             </p>
             <Button asChild className="w-full">
               <Link to="/app">Get Started</Link>
             </Button>
+          </div>
+        </section>
+
+        {/* ── Stored-value disclosure (required merchant disclosure) ──── */}
+        <section className="flex flex-col gap-4">
+          <div className="text-center">
+            <h2 className="text-2xl font-bold text-foreground">Stored Value Disclosure</h2>
+          </div>
+          <div className="mx-auto w-full max-w-2xl rounded-xl border border-border bg-card p-6 text-sm text-muted-foreground space-y-3">
+            <p>
+              SUPREMA TECHNOLOGIES LTD does{" "}
+              <span className="font-semibold text-foreground">not</span> provide
+              stored-value, e-wallet, or top-up services. Every payment on this
+              platform is a prepaid fee for a specific service: one credit
+              corresponds to exactly one mobile application analysis
+              (NT$900 ≈ USD 30).
+            </p>
+            <p>
+              Credits have no cash value, are non-transferable, cannot be
+              exchanged or refunded for cash, and cannot be used for any purpose
+              other than the analysis services described on this page.
+            </p>
+            <p>
+              本網站不提供儲值服務；點數為預付之應用程式分析服務費用，僅可兌換本平台之分析服務，不得轉讓、兌換現金或移作其他用途。
+            </p>
           </div>
         </section>
 

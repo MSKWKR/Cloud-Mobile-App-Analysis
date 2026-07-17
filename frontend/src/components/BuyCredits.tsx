@@ -6,18 +6,19 @@ import { Button } from "./ui/button";
 interface CreditPackage {
   id: string;
   credits: number;
-  price: number; // in cents
+  twd: number; // charged amount in NT$ (NewebPay settles in TWD only)
   label?: string;
   popular?: boolean;
 }
 
-// 1 credit = 1 upload = USD 30, matching the advertised price on /product.
-// Must stay in sync with VALID_PACKAGES in server/checkout.ts.
+// 1 credit = 1 upload = NT$900 (≈ USD 30), matching the /product page.
+// Package ids must stay in sync with VALID_PACKAGES in server/newebpay.ts.
+const TWD_PER_CREDIT = 900;
 const CREDIT_PACKAGES: CreditPackage[] = [
-  { id: "starter", credits: 1, price: 3000, label: "Starter" },
-  { id: "pro", credits: 5, price: 15000, label: "Pro", popular: true },
-  { id: "power", credits: 10, price: 30000, label: "Power" },
-  { id: "enterprise", credits: 25, price: 75000, label: "Enterprise" },
+  { id: "starter", credits: 1, twd: 1 * TWD_PER_CREDIT, label: "Starter" },
+  { id: "pro", credits: 5, twd: 5 * TWD_PER_CREDIT, label: "Pro", popular: true },
+  { id: "power", credits: 10, twd: 10 * TWD_PER_CREDIT, label: "Power" },
+  { id: "enterprise", credits: 25, twd: 25 * TWD_PER_CREDIT, label: "Enterprise" },
 ];
 
 interface BuyCreditsProps {
@@ -31,11 +32,7 @@ const BuyCredits: React.FC<BuyCreditsProps> = ({ currentCredits = 0, onBack }) =
   const [error, setError] = React.useState("");
   const [success, setSuccess] = React.useState("");
 
-  const formatPrice = (cents: number) =>
-    `$${(cents / 100).toFixed(2)}`;
-
-  const pricePerCredit = (pkg: CreditPackage) =>
-    ((pkg.price / pkg.credits) / 100).toFixed(2);
+  const formatPrice = (twd: number) => `NT$${twd.toLocaleString()}`;
 
   const handlePurchase = async () => {
     const pkg = CREDIT_PACKAGES.find((p) => p.id === selected);
@@ -49,20 +46,16 @@ const BuyCredits: React.FC<BuyCreditsProps> = ({ currentCredits = 0, onBack }) =
       const token = await auth.currentUser?.getIdToken();
       if (!token) throw new Error("You must be logged in to purchase credits.");
 
-      // Create a Stripe Checkout session via your backend
+      // Get signed MPG form fields from the backend
       const response = await fetch(
-        `${import.meta.env.VITE_BACKEND_URL}/api/createCheckoutSession`,
+        `${import.meta.env.VITE_BACKEND_URL}/api/newebpay/checkout`,
         {
           method: "POST",
           headers: {
             Authorization: `Bearer ${token}`,
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({
-            packageId: pkg.id,
-            credits: pkg.credits,
-            priceInCents: pkg.price,
-          }),
+          body: JSON.stringify({ packageId: pkg.id }),
         }
       );
 
@@ -71,10 +64,29 @@ const BuyCredits: React.FC<BuyCreditsProps> = ({ currentCredits = 0, onBack }) =
         throw new Error(data.error ?? "Failed to create checkout session.");
       }
 
-      const { url } = await response.json();
+      const { gateway, merchantID, tradeInfo, tradeSha, version } =
+        await response.json();
 
-      // Redirect to Stripe Checkout
-      window.location.href = url;
+      // NewebPay requires a foreground HTML form post to the MPG payment page
+      // (iframe/background posts are rejected with MPG02005).
+      const form = document.createElement("form");
+      form.method = "POST";
+      form.action = gateway;
+      const fields: Record<string, string> = {
+        MerchantID: merchantID,
+        TradeInfo: tradeInfo,
+        TradeSha: tradeSha,
+        Version: version,
+      };
+      for (const [name, value] of Object.entries(fields)) {
+        const input = document.createElement("input");
+        input.type = "hidden";
+        input.name = name;
+        input.value = value;
+        form.appendChild(input);
+      }
+      document.body.appendChild(form);
+      form.submit();
     } catch (err: any) {
       setError(err.message ?? "Something went wrong. Please try again.");
       setLoading(false);
@@ -140,10 +152,10 @@ const BuyCredits: React.FC<BuyCreditsProps> = ({ currentCredits = 0, onBack }) =
                 </span>
               </span>
               <span className="text-white font-semibold mt-1">
-                {formatPrice(pkg.price)}
+                {formatPrice(pkg.twd)}
               </span>
               <span className="text-gray-500 text-xs mt-1">
-                ${pricePerCredit(pkg)} per credit
+                NT$900 (≈US$30) per credit
               </span>
             </button>
           );
@@ -160,7 +172,7 @@ const BuyCredits: React.FC<BuyCreditsProps> = ({ currentCredits = 0, onBack }) =
               <span className="text-gray-400">
                 {pkg.credits.toLocaleString()} credits
               </span>
-              <span className="text-white">{formatPrice(pkg.price)}</span>
+              <span className="text-white">{formatPrice(pkg.twd)}</span>
             </div>
             <div className="flex justify-between text-sm border-t border-white/10 pt-2">
               <span className="text-gray-400">New balance after purchase</span>
@@ -186,8 +198,10 @@ const BuyCredits: React.FC<BuyCreditsProps> = ({ currentCredits = 0, onBack }) =
       </Button>
 
       <p className="text-gray-500 text-xs text-center">
-        Payments are processed securely by Stripe. Credits are added to your
-        account instantly after payment.
+        Payments are processed securely by NewebPay (藍新金流) in New Taiwan
+        Dollars. Credits are added to your account once payment is confirmed.
+        Credits are prepaid analysis fees — not stored value — and cannot be
+        transferred or redeemed for cash.
       </p>
     </div>
   );
