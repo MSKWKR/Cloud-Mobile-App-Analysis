@@ -11,9 +11,9 @@ interface CreditPackage {
   popular?: boolean;
 }
 
-// 1 credit = 1 upload = NT$900 (≈ USD 30), matching the /product page.
+// 1 credit = 1 upload = NT$1,000 (≈ USD 30), matching the /product page.
 // Package ids must stay in sync with VALID_PACKAGES in server/newebpay.ts.
-const TWD_PER_CREDIT = 900;
+const TWD_PER_CREDIT = 1000;
 const CREDIT_PACKAGES: CreditPackage[] = [
   { id: "starter", credits: 1, twd: 1 * TWD_PER_CREDIT, label: "Starter" },
   { id: "pro", credits: 5, twd: 5 * TWD_PER_CREDIT, label: "Pro", popular: true },
@@ -155,7 +155,7 @@ const BuyCredits: React.FC<BuyCreditsProps> = ({ currentCredits = 0, onBack }) =
                 {formatPrice(pkg.twd)}
               </span>
               <span className="text-gray-500 text-xs mt-1">
-                NT$900 (≈US$30) per credit
+                NT$1,000 (≈US$30) per credit
               </span>
             </button>
           );

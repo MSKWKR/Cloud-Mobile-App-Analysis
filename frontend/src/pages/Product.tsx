@@ -196,7 +196,7 @@ function Product() {
           <div className="mx-auto w-full max-w-sm rounded-xl border border-border bg-card p-8 text-center">
             <h3 className="font-semibold text-foreground">Application Analysis</h3>
             <div className="my-4">
-              <span className="text-5xl font-bold text-foreground">NT$900</span>
+              <span className="text-5xl font-bold text-foreground">NT$1,000</span>
               <span className="text-muted-foreground"> / upload</span>
               <div className="text-muted-foreground mt-1">≈ USD 30</div>
             </div>
@@ -224,7 +224,7 @@ function Product() {
               stored-value, e-wallet, or top-up services. Every payment on this
               platform is a prepaid fee for a specific service: one credit
               corresponds to exactly one mobile application analysis
-              (NT$900 ≈ USD 30).
+              (NT$1,000 ≈ USD 30).
             </p>
             <p>
               Credits have no cash value, are non-transferable, cannot be
