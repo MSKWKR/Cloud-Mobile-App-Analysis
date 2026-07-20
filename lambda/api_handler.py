@@ -23,6 +23,7 @@ Env vars:
 
 import os
 import json
+import time
 import uuid
 import boto3
 
@@ -30,6 +31,10 @@ import jobstore
 
 WORKER_FUNCTION_NAME = os.environ["WORKER_FUNCTION_NAME"]
 SAMPLE_BUCKET = os.getenv("SAMPLE_BUCKET", "")
+# If the worker dies without running its except block (timeout / OOM -> SIGKILL),
+# the job never leaves "running". Treat anything not updated for longer than the
+# worker's 900s timeout (+ slack) as dead so callers aren't strung along forever.
+JOB_STALE_SECS = int(os.getenv("JOB_STALE_SECS", "1200"))
 
 _lambda = boto3.client("lambda")
 
@@ -116,6 +121,16 @@ def _status(job_id):
     status = item.get("status")
 
     if status in ("pending", "running"):
+        updated_at = _num(item.get("updated_at")) or 0
+        if updated_at and time.time() - updated_at > JOB_STALE_SECS:
+            return _resp(
+                500,
+                {
+                    "status": "failed",
+                    "error": "Job stale: no progress for {}s — the worker was likely "
+                    "killed (out of memory or timeout)".format(JOB_STALE_SECS),
+                },
+            )
         return _resp(
             200,
             {

@@ -14,8 +14,10 @@ set -euo pipefail
 : "${JOB_TABLE:=android-static-jobs}"
 : "${WORKER_FN:=android-static-worker}"
 : "${API_FN:=android-static-api}"
-: "${WORKER_MEMORY:=3008}"
-: "${WORKER_TIMEOUT:=600}"
+# AWS granted the limit increase on 2026-07-17 (case 178357571200648) — the worker
+# needs the full 10 GB: androguard+maldroid OOMs below ~4 GB even on small APKs.
+: "${WORKER_MEMORY:=10240}"
+: "${WORKER_TIMEOUT:=900}"                  # Lambda max; androguard+maldroid is slow at 3 GB (~1.7 vCPU)
 : "${WORKER_EPHEMERAL:=2048}"               # /tmp size (MB): APK + reports
 : "${FUNCTION_URL_AUTH:=AWS_IAM}"           # AWS_IAM (recommended) or NONE
 
@@ -103,6 +105,13 @@ deploy_fn () {  # $1=name $2=role $3=handler $4=mem $5=timeout $6=ephemeral $7=e
 deploy_fn "$WORKER_FN" "$WORKER_ROLE" "worker_handler.handler" \
   "$WORKER_MEMORY" "$WORKER_TIMEOUT" "$WORKER_EPHEMERAL" \
   "Variables={JOB_TABLE=$JOB_TABLE,RESULT_BUCKET=$RESULT_BUCKET}"
+
+# Async retries re-run doomed jobs (OOM/timeout are deterministic) and flip the
+# job's step counter back and forth while the backend polls — disable them.
+aws lambda put-function-event-invoke-config --function-name "$WORKER_FN" --region "$AWS_REGION" \
+  --maximum-retry-attempts 0 >/dev/null 2>&1 \
+  || aws lambda update-function-event-invoke-config --function-name "$WORKER_FN" --region "$AWS_REGION" \
+    --maximum-retry-attempts 0 >/dev/null
 
 deploy_fn "$API_FN" "$API_ROLE" "api_handler.handler" \
   256 30 512 \
