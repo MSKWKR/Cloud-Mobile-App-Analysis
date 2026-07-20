@@ -12,7 +12,7 @@ import { FileMeta } from "./models/FileMeta";
 import { putFile, putJson, getJson } from "./s3";
 import { analyzeIOSStatic, analyzeAndroidStatic, analyzeAndroidDynamic} from "./dispatch";
 import guestRoutes from "./guest_routes";
-import checkoutRouter from "./checkout";
+import newebpayRouter from "./newebpay";
 
 const PDF_GENERATOR_URL = "http://pdf-generator:15148/api/report";
 
@@ -86,12 +86,11 @@ app.use(cors({
 }));
 app.options("*", cors());
 
-// Webhook must receive raw body — register before express.json()
-app.use("/api/stripeWebhook", express.raw({ type: "application/json" }));
 app.use(express.json());
 
 app.use("/guest", guestRoutes);
-app.use("/api", checkoutRouter);
+// NewebPay posts notify/return as form-urlencoded, hence the extra parser.
+app.use("/api/newebpay", express.urlencoded({ extended: false }), newebpayRouter);
 
 // Multer buffers the incoming upload to a local temp file; we then stream it to S3
 // and delete the temp file. S3 is the durable store — no local uploads/reports dirs.
