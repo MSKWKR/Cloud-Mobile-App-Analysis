@@ -6,7 +6,8 @@ FROM node:22-alpine3.21 AS build
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm install
+# npm ci: deterministic from the lockfile, and skips dependency resolution.
+RUN npm ci
 
 COPY . .
 RUN npm run build

@@ -1,0 +1,13 @@
+# Host node_modules must never enter the build context: it is ~440 MB of small
+# files, which dominates build time on the EC2 box (slow EBS) and clobbers the
+# image's own `npm ci` layer. The build stage installs its own copy.
+node_modules
+
+# Build output — regenerated inside the image by `npm run build`.
+dist
+
+# Local-only cruft
+.vite
+.env.local
+.DS_Store
+npm-debug.log*
