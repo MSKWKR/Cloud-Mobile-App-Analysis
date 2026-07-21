@@ -28,8 +28,8 @@ services:
       # SQLite database — must persist across container rebuilds
       - sqlite-data:/usr/src/app/data
     environment:
-      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
-      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
+      # Also used to build the NewebPay Notify/Return callback URLs, so it must be
+      # the public HTTPS origin NewebPay can reach.
       - CLIENT_URL=${CLIENT_URL}
       # AWS S3 — durable store for uploaded binaries + report artifacts
       - AWS_REGION=${AWS_REGION}
@@ -38,6 +38,14 @@ services:
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       # Android static analysis — AWS Lambda Function URL (auth: NONE)
       - ANDROID_STATIC_API=${ANDROID_STATIC_API}
+      # NewebPay (藍新金流) — credit purchases. Replaced Stripe.
+      # Gateway: https://ccore.newebpay.com (test) / https://core.newebpay.com (prod).
+      # Credentials are environment-specific and are NOT interchangeable.
+      - NEWEBPAY_MERCHANT_ID=${NEWEBPAY_MERCHANT_ID}
+      - NEWEBPAY_HASH_KEY=${NEWEBPAY_HASH_KEY}
+      - NEWEBPAY_HASH_IV=${NEWEBPAY_HASH_IV}
+      - NEWEBPAY_GATEWAY=${NEWEBPAY_GATEWAY}
+      - TWD_PER_CREDIT=${TWD_PER_CREDIT}
 
 volumes:
   sqlite-data:
