@@ -1,10 +1,14 @@
 # server/Dockerfile
-FROM node:22-alpine3.21
+# glibc (not alpine/musl) on purpose: better-sqlite3 publishes prebuilt binaries for
+# glibc only, so alpine forces a node-gyp source build of SQLite (~250k lines of C).
+# That took many minutes on the EC2 box; on bookworm the prebuild just downloads.
+FROM node:22-bookworm-slim
 
 WORKDIR /usr/src/app
 
 COPY package*.json ./
-RUN npm install
+# npm ci: deterministic from the lockfile and skips resolution work.
+RUN npm ci
 
 COPY . .
 
