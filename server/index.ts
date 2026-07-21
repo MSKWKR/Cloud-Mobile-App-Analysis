@@ -348,7 +348,15 @@ app.post("/generate-report", verifyToken, async (req: AuthRequest, res: Response
     }
 
     const pdfBuffer = Buffer.from(await pdfRes.arrayBuffer());
-    res.setHeader("Content-Disposition", `attachment; filename="${reportMeta.filename}.pdf"`);
+    // HTTP headers are latin-1 only: uploaded filenames can carry non-ASCII (or
+    // outright junk) bytes, which makes setHeader throw ERR_INVALID_CHAR. Send an
+    // ASCII-safe name plus the RFC 5987 form so browsers still get the real one.
+    const downloadName = `${reportMeta.filename}.pdf`;
+    const asciiName = downloadName.replace(/[^\x20-\x7E]/g, "_").replace(/["\\]/g, "_");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(downloadName)}`,
+    );
     res.setHeader("Content-Type", "application/pdf");
     res.send(pdfBuffer);
   } catch (err) {
