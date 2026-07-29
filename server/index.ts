@@ -9,12 +9,12 @@ import fs from "fs";
 import os from "os";
 import cors from "cors";
 import { FileMeta } from "./models/FileMeta";
-import { putFile, putJson, getJson } from "./s3";
+import { putFile, putJson, objectExists } from "./s3";
 import { analyzeIOSStatic, analyzeAndroidStatic, analyzeAndroidDynamic} from "./dispatch";
 import guestRoutes from "./guest_routes";
 import newebpayRouter from "./newebpay";
-
-const PDF_GENERATOR_URL = "http://pdf-generator:15148/api/report";
+import { startFxRefresh } from "./fx";
+import { renderReportPdf } from "./pdf";
 
 initializeApp({
   credential: cert(serviceAccount as ServiceAccount),
@@ -329,36 +329,24 @@ app.post("/generate-report", verifyToken, async (req: AuthRequest, res: Response
     const reportMeta = FileMeta.findOne({ hash, analysisType: type, user: user.id });
     if (!reportMeta) return res.status(404).json({ error: "Report not found" });
 
-    let reportData;
-    try {
-      reportData = await getJson(reportMeta.reportPath);
-    } catch (e) {
-      console.error("Report fetch from S3 failed:", e);
+    if (!(await objectExists(reportMeta.reportPath))) {
       return res.status(404).json({ error: "Report file missing" });
     }
 
-    const pdfRes = await fetch(PDF_GENERATOR_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(reportData),
+    // The PDF Lambda reads the report from S3, renders it, stores the PDF, and
+    // returns a presigned URL — so the bytes never pass through this server.
+    const result = await renderReportPdf({
+      reportKey: reportMeta.reportPath,
+      filename: `${reportMeta.filename}.pdf`,
     });
-    
-    if (!pdfRes.ok) {
-      throw new Error(`PDF generation failed with ${pdfRes.status}`);
+
+    if (!result.ok) {
+      throw new Error(`PDF generation failed: ${result.error}`);
     }
 
-    const pdfBuffer = Buffer.from(await pdfRes.arrayBuffer());
-    // HTTP headers are latin-1 only: uploaded filenames can carry non-ASCII (or
-    // outright junk) bytes, which makes setHeader throw ERR_INVALID_CHAR. Send an
-    // ASCII-safe name plus the RFC 5987 form so browsers still get the real one.
-    const downloadName = `${reportMeta.filename}.pdf`;
-    const asciiName = downloadName.replace(/[^\x20-\x7E]/g, "_").replace(/["\\]/g, "_");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(downloadName)}`,
-    );
-    res.setHeader("Content-Type", "application/pdf");
-    res.send(pdfBuffer);
+    // The browser downloads straight from S3; Content-Disposition (including the
+    // filename) was set on the object when the Lambda wrote it.
+    res.json({ url: result.url, expiresIn: result.expires_in });
   } catch (err) {
     console.error("Report generation error:", err);
     res.status(500).json({ error: "Failed to generate report" });
@@ -455,4 +443,7 @@ app.post("/api/consumeCredit", verifyToken, async (req: AuthRequest, res: Respon
 
 app.listen(3000, "0.0.0.0", () => {
   console.log("Backend running on http://localhost:3000");
+  // Prices are listed in USD but charged in TWD; keep the conversion rate warm.
+  // Non-blocking — checkout falls back to the last known rate if this fails.
+  startFxRefresh();
 });

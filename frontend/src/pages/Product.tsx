@@ -196,15 +196,18 @@ function Product() {
           <div className="mx-auto w-full max-w-sm rounded-xl border border-border bg-card p-8 text-center">
             <h3 className="font-semibold text-foreground">Application Analysis</h3>
             <div className="my-4">
-              <span className="text-5xl font-bold text-foreground">NT$1,000</span>
+              <span className="text-5xl font-bold text-foreground">US$30</span>
               <span className="text-muted-foreground"> / upload</span>
-              <div className="text-muted-foreground mt-1">≈ USD 30</div>
+              <div className="text-muted-foreground mt-1">
+                billed in TWD at the current exchange rate
+              </div>
             </div>
             <p className="text-sm text-muted-foreground mb-6">
               Each upload includes full static and dynamic analysis of one IPA or
-              APK file with a downloadable PDF security report. All payments are
-              charged in New Taiwan Dollars (TWD); the USD price is shown for
-              reference only.
+              APK file with a downloadable PDF security report. Prices are listed
+              in US dollars. Payments are processed by NewebPay (藍新金流) and
+              charged in New Taiwan Dollars (TWD); the exact TWD amount is shown
+              before you pay.
             </p>
             <Button asChild className="w-full">
               <Link to="/app">Get Started</Link>
@@ -223,8 +226,8 @@ function Product() {
               <span className="font-semibold text-foreground">not</span> provide
               stored-value, e-wallet, or top-up services. Every payment on this
               platform is a prepaid fee for a specific service: one credit
-              corresponds to exactly one mobile application analysis
-              (NT$1,000 ≈ USD 30).
+              corresponds to exactly one mobile application analysis (US$30,
+              charged in TWD at the exchange rate shown at checkout).
             </p>
             <p>
               Credits have no cash value, are non-transferable, cannot be

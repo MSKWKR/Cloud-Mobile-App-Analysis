@@ -6,19 +6,25 @@ import { Button } from "./ui/button";
 interface CreditPackage {
   id: string;
   credits: number;
-  twd: number; // charged amount in NT$ (NewebPay settles in TWD only)
+  usd: number; // list price — fixed, and the same everywhere on the site
+  twd?: number; // what NewebPay actually charges, at today's rate
   label?: string;
   popular?: boolean;
 }
 
-// 1 credit = 1 upload = NT$1,000 (≈ USD 30), matching the /product page.
+// 1 credit = 1 upload = US$30, matching the /product page.
 // Package ids must stay in sync with VALID_PACKAGES in server/newebpay.ts.
-const TWD_PER_CREDIT = 1000;
+//
+// Prices are denominated in USD; NewebPay can only charge TWD, so the NT$ figure
+// is derived from a live rate and comes from GET /api/newebpay/pricing. These
+// are the USD fallbacks used until that request lands (or if it fails) — the
+// server is authoritative for the TWD actually charged.
+const USD_PER_CREDIT = 30;
 const CREDIT_PACKAGES: CreditPackage[] = [
-  { id: "starter", credits: 1, twd: 1 * TWD_PER_CREDIT, label: "Starter" },
-  { id: "pro", credits: 5, twd: 5 * TWD_PER_CREDIT, label: "Pro", popular: true },
-  { id: "power", credits: 10, twd: 10 * TWD_PER_CREDIT, label: "Power" },
-  { id: "enterprise", credits: 25, twd: 25 * TWD_PER_CREDIT, label: "Enterprise" },
+  { id: "starter", credits: 1, usd: 1 * USD_PER_CREDIT, label: "Starter" },
+  { id: "pro", credits: 5, usd: 5 * USD_PER_CREDIT, label: "Pro", popular: true },
+  { id: "power", credits: 10, usd: 10 * USD_PER_CREDIT, label: "Power" },
+  { id: "enterprise", credits: 25, usd: 25 * USD_PER_CREDIT, label: "Enterprise" },
 ];
 
 interface BuyCreditsProps {
@@ -31,8 +37,41 @@ const BuyCredits: React.FC<BuyCreditsProps> = ({ currentCredits = 0, onBack }) =
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState("");
   const [success, setSuccess] = React.useState("");
+  const [packages, setPackages] = React.useState<CreditPackage[]>(CREDIT_PACKAGES);
+  const [rate, setRate] = React.useState<number | null>(null);
 
-  const formatPrice = (twd: number) => `NT$${twd.toLocaleString()}`;
+  // Pull the TWD figures the server will actually charge. Purely additive: if
+  // this fails the USD prices above still render, and the server recomputes the
+  // amount at checkout regardless of what was displayed here.
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `${import.meta.env.VITE_BACKEND_URL}/api/newebpay/pricing`
+        );
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled || !Array.isArray(data.packages)) return;
+        setRate(data.rate ?? null);
+        setPackages((prev) =>
+          prev.map((p) => {
+            const live = data.packages.find((q: CreditPackage) => q.id === p.id);
+            return live ? { ...p, usd: live.usd, twd: live.twd } : p;
+          })
+        );
+      } catch {
+        /* keep the USD-only view */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const formatUsd = (usd: number) => `US$${usd.toLocaleString()}`;
+  const formatTwd = (twd?: number) =>
+    twd == null ? null : `NT$${twd.toLocaleString()}`;
 
   const handlePurchase = async () => {
     const pkg = CREDIT_PACKAGES.find((p) => p.id === selected);
@@ -121,7 +160,7 @@ const BuyCredits: React.FC<BuyCreditsProps> = ({ currentCredits = 0, onBack }) =
 
       {/* Package grid */}
       <div className="grid grid-cols-2 gap-3">
-        {CREDIT_PACKAGES.map((pkg) => {
+        {packages.map((pkg) => {
           const isSelected = selected === pkg.id;
           return (
             <button
@@ -152,10 +191,12 @@ const BuyCredits: React.FC<BuyCreditsProps> = ({ currentCredits = 0, onBack }) =
                 </span>
               </span>
               <span className="text-white font-semibold mt-1">
-                {formatPrice(pkg.twd)}
+                {formatUsd(pkg.usd)}
               </span>
               <span className="text-gray-500 text-xs mt-1">
-                NT$1,000 (≈US$30) per credit
+                {formatTwd(pkg.twd)
+                  ? `charged as ${formatTwd(pkg.twd)}`
+                  : `US$${USD_PER_CREDIT} per credit`}
               </span>
             </button>
           );
@@ -164,7 +205,7 @@ const BuyCredits: React.FC<BuyCreditsProps> = ({ currentCredits = 0, onBack }) =
 
       {/* Summary */}
       {(() => {
-        const pkg = CREDIT_PACKAGES.find((p) => p.id === selected);
+        const pkg = packages.find((p) => p.id === selected);
         if (!pkg) return null;
         return (
           <div className="border border-white/10 rounded-lg px-4 py-3 space-y-2">
@@ -172,8 +213,22 @@ const BuyCredits: React.FC<BuyCreditsProps> = ({ currentCredits = 0, onBack }) =
               <span className="text-gray-400">
                 {pkg.credits.toLocaleString()} credits
               </span>
-              <span className="text-white">{formatPrice(pkg.twd)}</span>
+              <span className="text-white">{formatUsd(pkg.usd)}</span>
             </div>
+            {formatTwd(pkg.twd) && (
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-400">
+                  Amount charged
+                  {rate && (
+                    <span className="text-gray-500">
+                      {" "}
+                      (1 USD = {rate.toFixed(2)} TWD)
+                    </span>
+                  )}
+                </span>
+                <span className="text-white">{formatTwd(pkg.twd)}</span>
+              </div>
+            )}
             <div className="flex justify-between text-sm border-t border-white/10 pt-2">
               <span className="text-gray-400">New balance after purchase</span>
               <span className="text-green-400 font-medium">
@@ -198,10 +253,12 @@ const BuyCredits: React.FC<BuyCreditsProps> = ({ currentCredits = 0, onBack }) =
       </Button>
 
       <p className="text-gray-500 text-xs text-center">
-        Payments are processed securely by NewebPay (藍新金流) in New Taiwan
-        Dollars. Credits are added to your account once payment is confirmed.
-        Credits are prepaid analysis fees — not stored value — and cannot be
-        transferred or redeemed for cash.
+        Prices are listed in US dollars. Payments are processed securely by
+        NewebPay (藍新金流) and billed in New Taiwan Dollars at the exchange rate
+        shown above; cards issued outside Taiwan may be offered the option to pay
+        in their own currency at checkout. Credits are added to your account once
+        payment is confirmed. Credits are prepaid analysis fees — not stored
+        value — and cannot be transferred or redeemed for cash.
       </p>
     </div>
   );

@@ -7,6 +7,7 @@ import express from "express";
 import crypto from "crypto";
 import { getAuth } from "firebase-admin/auth";
 import { db } from "./db";
+import { getTwdPerUsd } from "./fx";
 
 const router = express.Router();
 
@@ -17,8 +18,12 @@ const HASH_IV = process.env.NEWEBPAY_HASH_IV ?? "";
 // Test: https://ccore.newebpay.com  ·  Production: https://core.newebpay.com
 const GATEWAY_BASE = process.env.NEWEBPAY_GATEWAY ?? "https://ccore.newebpay.com";
 const CLIENT_URL = process.env.CLIENT_URL ?? "";
-// 1 credit = 1 upload. NT$1,000 ≈ USD 30 — must match the /product page.
-const TWD_PER_CREDIT = Number(process.env.TWD_PER_CREDIT ?? 1000);
+// 1 credit = 1 upload, priced in USD — the platform is international and USD is
+// the listed price everywhere. NewebPay can only *charge* TWD (MPG `Amt` is an
+// integer in 新台幣; the spec has no currency parameter), so each order converts
+// USD→TWD at checkout using the cached rate from fx.ts. The TWD figure therefore
+// moves with the market while the USD price stays fixed.
+const USD_PER_CREDIT = Number(process.env.USD_PER_CREDIT ?? 30);
 
 // Same package ids as the frontend BuyCredits component.
 const VALID_PACKAGES: Record<string, number> = {
@@ -27,6 +32,13 @@ const VALID_PACKAGES: Record<string, number> = {
   power: 10,
   enterprise: 25,
 };
+
+/** USD list price and the TWD actually charged, at today's rate. */
+function priceFor(credits: number) {
+  const { rate, source, fetchedAt, stale } = getTwdPerUsd();
+  const usd = credits * USD_PER_CREDIT;
+  return { usd, twd: Math.round(usd * rate), rate, source, fetchedAt, stale };
+}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS newebpay_orders (
@@ -41,8 +53,22 @@ db.exec(`
   );
 `);
 
+// Added when pricing moved from fixed TWD to USD-pegged. `amt` stays the TWD
+// charged (that is what NewebPay echoes back and what the notify guard compares);
+// these record what the TWD was derived from, for receipts and reconciliation.
+for (const [col, decl] of [
+  ["usdAmt", "REAL"],
+  ["fxRate", "REAL"],
+] as const) {
+  const exists = (db.prepare("PRAGMA table_info(newebpay_orders)").all() as {
+    name: string;
+  }[]).some((c) => c.name === col);
+  if (!exists) db.exec(`ALTER TABLE newebpay_orders ADD COLUMN ${col} ${decl}`);
+}
+
 const insertOrder = db.prepare(
-  "INSERT INTO newebpay_orders (orderNo, uid, credits, amt) VALUES (?, ?, ?, ?)"
+  `INSERT INTO newebpay_orders (orderNo, uid, credits, amt, usdAmt, fxRate)
+   VALUES (?, ?, ?, ?, ?, ?)`
 );
 const findOrder = db.prepare("SELECT * FROM newebpay_orders WHERE orderNo = ?");
 // Atomic pending→paid transition makes the notify handler idempotent.
@@ -107,6 +133,26 @@ async function requireAuth(
   }
 }
 
+// ── GET /api/newebpay/pricing ───────────────────────────────────────────────
+// Public. Lets the frontend show the exact TWD it is about to charge next to the
+// USD list price, so the gateway page never reveals an amount the user has not
+// already seen. Keep the package ids in sync with CREDIT_PACKAGES on the client.
+router.get("/pricing", (_req, res) => {
+  const { rate, source, fetchedAt, stale } = getTwdPerUsd();
+  return res.json({
+    usdPerCredit: USD_PER_CREDIT,
+    currency: "TWD", // what NewebPay actually charges
+    rate,
+    rateSource: source,
+    rateFetchedAt: fetchedAt,
+    rateIsFallback: stale,
+    packages: Object.entries(VALID_PACKAGES).map(([id, credits]) => {
+      const { usd, twd } = priceFor(credits);
+      return { id, credits, usd, twd };
+    }),
+  });
+});
+
 // ── POST /api/newebpay/checkout ─────────────────────────────────────────────
 // Returns the signed fields the frontend form-posts to the MPG gateway.
 router.post("/checkout", requireAuth, async (req, res) => {
@@ -120,11 +166,11 @@ router.post("/checkout", requireAuth, async (req, res) => {
 
   const uid = (req as any).uid as string;
   const email = (req as any).email as string;
-  const amt = credits * TWD_PER_CREDIT;
+  const { usd, twd: amt, rate } = priceFor(credits);
 
   // MerchantOrderNo: unique, ≤30 chars, [A-Za-z0-9_] only.
   const orderNo = `CMAA${Date.now()}${Math.floor(Math.random() * 9000 + 1000)}`;
-  insertOrder.run(orderNo, uid, credits, amt);
+  insertOrder.run(orderNo, uid, credits, amt, usd, rate);
 
   const tradeInfoPlain = new URLSearchParams({
     MerchantID: MERCHANT_ID,
@@ -134,7 +180,9 @@ router.post("/checkout", requireAuth, async (req, res) => {
     LangType: "en",
     MerchantOrderNo: orderNo,
     Amt: String(amt),
-    ItemDesc: `${credits} Analysis Credits`,
+    // ItemDesc is Varchar(50); the USD price is included so the gateway page and
+    // the customer's receipt both show what the TWD figure was derived from.
+    ItemDesc: `${credits} Analysis Credits (US$${usd})`,
     Email: email ?? "",
     NotifyURL: `${CLIENT_URL}/api/newebpay/notify`,
     ReturnURL: `${CLIENT_URL}/api/newebpay/return`,
@@ -150,6 +198,11 @@ router.post("/checkout", requireAuth, async (req, res) => {
     tradeInfo: encrypted,
     tradeSha: tradeSha(encrypted),
     version: "2.0",
+    // Echoed back so the client can confirm the figures it displayed are the
+    // ones that were signed, rather than a rate that moved mid-session.
+    usd,
+    twd: amt,
+    rate,
   });
 });
 
