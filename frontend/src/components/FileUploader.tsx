@@ -264,6 +264,9 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUpload }) => {
                 Authorization: `Bearer ${token}`,
                 "Content-Type": "application/json",
               },
+              // Recorded in the credit ledger so a spend can be traced back to
+              // the analysis it paid for (server/credit_audit.ts).
+              body: JSON.stringify({ hash, type: analysisType }),
             });
 
             if (!res.ok) {

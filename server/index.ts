@@ -15,6 +15,13 @@ import guestRoutes from "./guest_routes";
 import newebpayRouter from "./newebpay";
 import { startFxRefresh } from "./fx";
 import { renderReportPdf } from "./pdf";
+import {
+  recordCreditChange,
+  startCreditAudit,
+  creditAuditRouter,
+  SIGNUP_CREDITS,
+} from "./credit_audit";
+import crypto from "crypto";
 
 initializeApp({
   credential: cert(serviceAccount as ServiceAccount),
@@ -60,19 +67,35 @@ async function getUserCredits(uid: string): Promise<number> {
 
 // Atomically decrement one credit, only if the balance is > 0.
 // Runs in a Firestore transaction so concurrent uploads can't double-spend.
-async function consumeCredit(uid: string) {
-  const ref = db.collection("users").doc(uid);
+async function consumeCredit(uid: string, note?: string) {
+  const docRef = db.collection("users").doc(uid);
   const remaining = await db.runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
+    const snap = await tx.get(docRef);
     const current = snap.exists ? Number(snap.data()?.credits ?? 0) : 0;
     if (current <= 0) return null; // signal insufficient credits
-    tx.update(ref, { credits: current - 1 });
+    tx.update(docRef, { credits: current - 1 });
     return current - 1;
   });
 
   if (remaining === null) {
     return { success: false, error: "no_credits_or_user_not_found" };
   }
+
+  // Journal the spend so the daily audit can reconcile the new balance
+  // (server/credit_audit.ts). Unjournaled spends surface as an unexplained
+  // *decrease*, which is a warning, not an alarm — but keep the books straight.
+  // The ref is a fresh uuid rather than the file hash: the same file can legally
+  // be analysed twice, and a unique (reason, ref) would silently swallow the
+  // second spend. The hash rides along in the note for tracing instead.
+  recordCreditChange({
+    uid,
+    delta: -1,
+    reason: "consume",
+    ref: `consume:${crypto.randomUUID()}`,
+    balanceAfter: remaining,
+    note: note ?? null,
+  });
+
   return { success: true, remainingCredits: remaining };
 }
 
@@ -91,6 +114,9 @@ app.use(express.json());
 app.use("/guest", guestRoutes);
 // NewebPay posts notify/return as form-urlencoded, hence the extra parser.
 app.use("/api/newebpay", express.urlencoded({ extended: false }), newebpayRouter);
+// Credit reconciliation console. Static-token auth (ADMIN_API_TOKEN), not Firebase —
+// it has to stay usable when Firebase is the thing under suspicion.
+app.use("/api/admin/credit-audit", creditAuditRouter);
 
 // Multer buffers the incoming upload to a local temp file; we then stream it to S3
 // and delete the temp file. S3 is the durable store — no local uploads/reports dirs.
@@ -387,13 +413,28 @@ app.post("/api/initUser", verifyToken, async (req: any, res) => {
       user = User.create(uid, email);
     }
 
-    // Firestore holds the credit balance. Seed new users with 10, once.
+    // Firestore holds the credit balance. Seed new users once, with the same
+    // SIGNUP_CREDITS the audit expects to see journaled (server/credit_audit.ts).
     const ref = db.collection("users").doc(uid);
     const snap = await ref.get();
     if (!snap.exists) {
-      await ref.set({ email, credits: 10, createdAt: FieldValue.serverTimestamp() });
+      await ref.set({
+        email,
+        credits: SIGNUP_CREDITS,
+        createdAt: FieldValue.serverTimestamp(),
+      });
+      // ref = uid, so a second seed for the same account cannot be journaled —
+      // and an unjournaled grant is exactly what the audit flags.
+      recordCreditChange({
+        uid,
+        delta: SIGNUP_CREDITS,
+        reason: "signup",
+        ref: uid,
+        balanceAfter: SIGNUP_CREDITS,
+        note: email ?? null,
+      });
     }
-    const credits = snap.exists ? Number(snap.data()?.credits ?? 0) : 10;
+    const credits = snap.exists ? Number(snap.data()?.credits ?? 0) : SIGNUP_CREDITS;
 
     res.json({ uid, email, credits });
   } catch (err) {
@@ -431,7 +472,13 @@ app.post("/api/consumeCredit", verifyToken, async (req: AuthRequest, res: Respon
   if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
   try {
-    const result = await consumeCredit(req.user.uid);
+    // Optional, sent by the uploader — recorded in the ledger so a spend can be
+    // traced back to the analysis it paid for.
+    const { hash, type } = req.body ?? {};
+    const note =
+      typeof hash === "string" ? `upload ${hash}${type ? ` (${type})` : ""}` : undefined;
+
+    const result = await consumeCredit(req.user.uid, note);
     if (!result.success) return res.status(400).json({ error: "No credits left" });
 
     return res.json({ remainingCredits: result.remainingCredits });
@@ -446,4 +493,6 @@ app.listen(3000, "0.0.0.0", () => {
   // Prices are listed in USD but charged in TWD; keep the conversion rate warm.
   // Non-blocking — checkout falls back to the last known rate if this fails.
   startFxRefresh();
+  // Daily snapshot + reconciliation of every credit balance against the ledger.
+  startCreditAudit();
 });

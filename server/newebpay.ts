@@ -8,6 +8,7 @@ import crypto from "crypto";
 import { getAuth } from "firebase-admin/auth";
 import { db } from "./db";
 import { getTwdPerUsd } from "./fx";
+import { recordCreditChange } from "./credit_audit";
 
 const router = express.Router();
 
@@ -56,9 +57,13 @@ db.exec(`
 // Added when pricing moved from fixed TWD to USD-pegged. `amt` stays the TWD
 // charged (that is what NewebPay echoes back and what the notify guard compares);
 // these record what the TWD was derived from, for receipts and reconciliation.
+// `paidAt` was added with the credit audit: reconciliation needs to know *when* a
+// payment was confirmed, not when the order was opened, to place it in the right
+// daily window (an order can be created one day and paid the next).
 for (const [col, decl] of [
   ["usdAmt", "REAL"],
   ["fxRate", "REAL"],
+  ["paidAt", "TEXT"],
 ] as const) {
   const exists = (db.prepare("PRAGMA table_info(newebpay_orders)").all() as {
     name: string;
@@ -73,7 +78,9 @@ const insertOrder = db.prepare(
 const findOrder = db.prepare("SELECT * FROM newebpay_orders WHERE orderNo = ?");
 // Atomic pending→paid transition makes the notify handler idempotent.
 const markPaid = db.prepare(
-  "UPDATE newebpay_orders SET status = 'paid', tradeNo = ? WHERE orderNo = ? AND status = 'pending'"
+  `UPDATE newebpay_orders
+      SET status = 'paid', tradeNo = ?, paidAt = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    WHERE orderNo = ? AND status = 'pending'`
 );
 
 interface OrderRow {
@@ -253,11 +260,25 @@ router.post("/notify", async (req, res) => {
   const updated = markPaid.run(result.TradeNo ?? null, orderNo);
   if (updated.changes === 1) {
     const { getFirestore, FieldValue } = await import("firebase-admin/firestore");
-    await getFirestore()
-      .collection("users")
-      .doc(order.uid)
-      .set({ credits: FieldValue.increment(order.credits) }, { merge: true });
+    const ref = getFirestore().collection("users").doc(order.uid);
+    await ref.set({ credits: FieldValue.increment(order.credits) }, { merge: true });
     console.log(`NewebPay: credited ${order.credits} to ${order.uid} (${orderNo})`);
+
+    // Journal the grant so the daily audit can account for the new balance.
+    // After the Firestore write, and never allowed to fail the request: an
+    // unjournaled grant is detected and backfilled from this paid order tomorrow.
+    const balanceAfter = await ref
+      .get()
+      .then((s) => Number(s.data()?.credits ?? 0))
+      .catch(() => null);
+    recordCreditChange({
+      uid: order.uid,
+      delta: order.credits,
+      reason: "purchase",
+      ref: orderNo,
+      balanceAfter,
+      note: `NewebPay ${result.TradeNo ?? "?"} · NT$${order.amt}`,
+    });
   }
 
   return res.status(200).send("ok");

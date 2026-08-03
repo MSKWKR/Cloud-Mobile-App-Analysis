@@ -151,16 +151,19 @@ const UploadHistory: React.FC<UploadHistoryProps> = ({ refreshSignal }) => {
       });
       if (!res.ok) throw new Error("Failed to trigger report generation");
 
-      // Download the generated PDF
-      const blob = await res.blob();                // Get the response as a blob
-      const url = window.URL.createObjectURL(blob); // Create a URL for the blob
-      const link = document.createElement("a");     // Create a temporary "a" element
-      link.href = url;                              // Set the href to the blob URL
+      // The backend returns a short-lived presigned S3 URL; the PDF is downloaded
+      // straight from S3 rather than streamed through the backend.
+      const { url } = (await res.json()) as { url?: string };
+      if (!url) throw new Error("No download URL returned");
+
+      const link = document.createElement("a");
+      link.href = url;
+      // The object's Content-Disposition already carries the filename; this is the
+      // hint for browsers that honour the attribute on same-navigation downloads.
       link.setAttribute("download", `${upload.filename}-${upload.analysisType}.pdf`);
       document.body.appendChild(link);
       link.click();
-      link.parentNode?.removeChild(link);           // Clean up the temp "a" element
-      window.URL.revokeObjectURL(url);              // Clean up the URL object
+      link.parentNode?.removeChild(link);
     } catch (err) {
       console.error("Report generation error:", err);
     }
