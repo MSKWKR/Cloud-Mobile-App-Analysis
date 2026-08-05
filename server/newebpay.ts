@@ -71,6 +71,14 @@ for (const [col, decl] of [
   if (!exists) db.exec(`ALTER TABLE newebpay_orders ADD COLUMN ${col} ${decl}`);
 }
 
+// The credit audit asks "which orders did this user pay for in this window?" once
+// per user per night; the primary key on orderNo is no help for that. Declared
+// after the ALTER loop because it names a column that loop may have just added.
+db.exec(`
+  CREATE INDEX IF NOT EXISTS newebpay_orders_uid_paid
+    ON newebpay_orders (uid, status, paidAt);
+`);
+
 const insertOrder = db.prepare(
   `INSERT INTO newebpay_orders (orderNo, uid, credits, amt, usdAmt, fxRate)
    VALUES (?, ?, ?, ?, ?, ?)`

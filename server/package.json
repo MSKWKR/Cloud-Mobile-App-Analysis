@@ -34,7 +34,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "credit-audit": "tsx credit_audit_cli.ts",
-    "test:credit-audit": "npm run build && node tests/credit_audit.test.js && node tests/credit_audit_writes.test.js"
+    "test:credit-audit": "npm run build && node tests/credit_audit.test.js && node tests/credit_audit_writes.test.js && node tests/credit_audit_gaps.test.js"
   },
   "allowScripts": {
     "better-sqlite3@12.11.1": true

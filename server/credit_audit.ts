@@ -19,6 +19,14 @@
 // entry against the one-per-user seed. A hacker who both raises the Firestore
 // balance *and* forges a ledger row still fails the payment-backing check.
 //
+// Two checks exist because a day-over-day comparison alone has blind spots:
+//   • paid orders are matched in both directions, so a payment that was charged
+//     and never credited (drift of exactly zero) is found as well as one that was
+//     credited and never journaled;
+//   • each entry's recorded balanceAfter is checked against the range the day's
+//     deltas allow, so a balance that was raised, spent down and put back before
+//     the next snapshot still leaves a trace.
+//
 // Nothing here writes to Firestore unless CREDIT_AUDIT_AUTO_CLAMP is on, and even
 // then it only ever removes unexplained credits — it never grants.
 
@@ -47,6 +55,12 @@ const WEBHOOK_URL = process.env.CREDIT_AUDIT_WEBHOOK_URL ?? "";
  */
 const AUTO_CLAMP = (process.env.CREDIT_AUDIT_AUTO_CLAMP ?? "false") === "true";
 const ADMIN_TOKEN = process.env.ADMIN_API_TOKEN ?? "";
+/**
+ * Days of snapshot history to keep. 0 disables pruning. The ledger and the
+ * anomaly record are never pruned — they are the evidence — and neither is any
+ * user's most recent snapshot, whatever its age.
+ */
+const RETENTION_DAYS = Number(process.env.CREDIT_AUDIT_RETENTION_DAYS ?? 180);
 
 const FIRESTORE_PAGE = 500;
 
@@ -77,9 +91,17 @@ db.exec(`
     uid          TEXT NOT NULL,
     email        TEXT,
     credits      INTEGER NOT NULL,          -- as observed, before any correction
-    takenAt      TEXT NOT NULL,             -- ISO instant; the ledger window boundary
+    -- ISO instant; the ledger window boundary. Per row, not per run: a user whose
+    -- balance was re-read mid-run is pinned to the instant of *that* read, and
+    -- reconciliation reads the boundary back per user.
+    takenAt      TEXT NOT NULL,
+    runId        INTEGER,                   -- which run wrote it; see user_disappeared
     PRIMARY KEY (snapshotDate, uid)
   );
+
+  -- Every run opens by asking for each user's latest snapshot by takenAt; the
+  -- primary key is (snapshotDate, uid), which does not serve that at all.
+  CREATE INDEX IF NOT EXISTS credit_snapshots_takenAt ON credit_snapshots (takenAt);
 
   CREATE TABLE IF NOT EXISTS credit_audit_runs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,6 +111,9 @@ db.exec(`
     finishedAt   TEXT,
     usersChecked INTEGER NOT NULL DEFAULT 0,
     baselined    INTEGER NOT NULL DEFAULT 0, -- users seen for the first time
+    -- What this run found, frozen at the moment it finished. Deliberately not
+    -- kept in step with credit_anomalies.status: "the run that reported it" is
+    -- the useful reading, not "how many are still open" (query for that).
     anomalies    INTEGER NOT NULL DEFAULT 0,
     critical     INTEGER NOT NULL DEFAULT 0,
     status       TEXT NOT NULL DEFAULT 'running'
@@ -108,6 +133,10 @@ db.exec(`
     currentCredits  INTEGER,
     ledgerDelta     INTEGER,
     expectedCredits INTEGER,
+    -- Size of the problem, signed. Its meaning follows the kind: for the balance
+    -- kinds it is currentCredits - expectedCredits, for the grant kinds it is
+    -- the suspect grant itself, for uncredited_payment it is what the customer
+    -- is owed. Not derivable from the neighbouring columns — don't assume.
     drift           INTEGER,
     detail          TEXT,                   -- JSON
     status          TEXT NOT NULL DEFAULT 'open'
@@ -120,6 +149,17 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS credit_anomalies_open
     ON credit_anomalies (status, detectedAt);
 `);
+
+// runId arrived after credit_snapshots did, so a database created by an earlier
+// build needs it added rather than recreated. Rows from before it existed keep a
+// null, which reads as "not from the last run" — silence rather than false alarms.
+if (
+  !(db.prepare("PRAGMA table_info(credit_snapshots)").all() as { name: string }[]).some(
+    (c) => c.name === "runId"
+  )
+) {
+  db.exec("ALTER TABLE credit_snapshots ADD COLUMN runId INTEGER");
+}
 
 // ── Ledger ──────────────────────────────────────────────────────────────────
 export type LedgerReason =
@@ -194,14 +234,15 @@ export function recordCreditChange(entry: LedgerEntry): boolean {
 // happens to share our millisecond — which then reconciles against a window that
 // already had its corrections applied.
 const previousSnapshots = db.prepare(
-  `SELECT uid, credits, snapshotDate, MAX(takenAt) AS takenAt
+  `SELECT uid, credits, snapshotDate, runId, MAX(takenAt) AS takenAt
      FROM credit_snapshots WHERE takenAt <= ? GROUP BY uid`
 );
 const upsertSnapshot = db.prepare(`
-  INSERT INTO credit_snapshots (snapshotDate, uid, email, credits, takenAt)
-  VALUES (?, ?, ?, ?, ?)
+  INSERT INTO credit_snapshots (snapshotDate, uid, email, credits, takenAt, runId)
+  VALUES (?, ?, ?, ?, ?, ?)
   ON CONFLICT(snapshotDate, uid) DO UPDATE SET
-    email = excluded.email, credits = excluded.credits, takenAt = excluded.takenAt
+    email = excluded.email, credits = excluded.credits,
+    takenAt = excluded.takenAt, runId = excluded.runId
 `);
 const ledgerInWindow = db.prepare(
   `SELECT * FROM credit_ledger
@@ -248,11 +289,25 @@ export type AnomalyKind =
   | "unexplained_increase"
   | "unexplained_decrease"
   | "unjournaled_purchase"
+  | "uncredited_payment"
+  | "ledger_balance_mismatch"
   | "unbacked_grant"
   | "duplicate_signup_grant"
   | "invalid_signup_amount"
   | "unknown_grant_reason"
+  | "invalid_balance"
   | "user_disappeared";
+
+/**
+ * Kinds worth reading a fresh balance for before alerting. These are the ones a
+ * write landing mid-run can manufacture; the rest are statements about records
+ * already written, which a second look cannot change.
+ */
+const RECHECK_KINDS = new Set<AnomalyKind>([
+  "unexplained_increase",
+  "unexplained_decrease",
+  "uncredited_payment",
+]);
 
 interface Anomaly {
   uid: string;
@@ -282,6 +337,12 @@ interface FsUser {
   uid: string;
   email: string | null;
   credits: number;
+  /**
+   * Set when users/{uid}.credits was not a whole number — a string, an object, a
+   * fraction, Infinity. Carries the original value so the alert can quote it.
+   * Present means `credits` is a placeholder and must not be reconciled against.
+   */
+  rawCredits?: unknown;
 }
 
 /** Every user document in Firestore, paged so a large collection can't blow memory. */
@@ -298,10 +359,18 @@ async function readAllBalances(): Promise<FsUser[]> {
 
     for (const doc of snap.docs) {
       const data = doc.data();
+      // A missing field is a fresh document and reads as 0. Anything present but
+      // not a whole number is refused rather than coerced: NaN would poison every
+      // comparison below it and then fail the NOT NULL snapshot insert, taking the
+      // whole run down over one bad document.
+      const raw = data.credits;
+      const n = Number(raw ?? 0);
+      const valid = Number.isSafeInteger(n);
       out.push({
         uid: doc.id,
         email: typeof data.email === "string" ? data.email : null,
-        credits: Number(data.credits ?? 0),
+        credits: valid ? n : 0,
+        ...(valid ? {} : { rawCredits: raw }),
       });
     }
     if (snap.size < FIRESTORE_PAGE) break;
@@ -316,7 +385,17 @@ interface LedgerRow {
   delta: number;
   reason: LedgerReason;
   ref: string | null;
+  balanceAfter: number | null;
   createdAt: string;
+}
+
+interface PaidOrder {
+  orderNo: string;
+  uid: string;
+  credits: number;
+  amt: number;
+  tradeNo: string | null;
+  paidAt: string | null;
 }
 
 /**
@@ -407,63 +486,132 @@ function reconcileUser(
     }
   }
 
-  // ── 2. Does the balance match the journal? ──────────────────────────────
-  if (drift !== 0) {
-    // A confirmed payment whose journal write failed looks identical to minted
-    // credits, so check that first: if paid orders in this window explain the gap
-    // exactly, it's a bookkeeping miss, not theft. Backfill so tomorrow is clean.
-    const journaledOrders = new Set(
-      entries.filter((e) => e.reason === "purchase" && e.ref).map((e) => e.ref as string)
-    );
-    const unjournaled = (
-      paidOrdersInWindow().all(user.uid, windowStart, windowEnd) as any[]
-    ).filter((o) => !journaledOrders.has(o.orderNo));
-    const unjournaledCredits = unjournaled.reduce((s, o) => s + Number(o.credits), 0);
+  // ── 2. Do the confirmed payments and the balance agree? ─────────────────
+  // Looked up whether or not the balance drifted. A payment fails in two opposite
+  // ways and only one of them moves a balance:
+  //   • credited but not journaled  → drift is positive; the paperwork is behind
+  //   • never credited at all       → drift is *zero*, because nothing happened.
+  // The second is invisible to a day-over-day comparison, and it is the one that
+  // costs a customer money: notify() marks the order paid in SQLite before it
+  // touches Firestore, so a crash in between charges the card and delivers
+  // nothing — and NewebPay's retry finds the order already `paid` and moves on.
+  const journaledOrders = new Set(
+    entries.filter((e) => e.reason === "purchase" && e.ref).map((e) => e.ref as string)
+  );
+  const unjournaled = (
+    paidOrdersInWindow().all(user.uid, windowStart, windowEnd) as PaidOrder[]
+  ).filter((o) => !journaledOrders.has(o.orderNo));
+  const unjournaledCredits = unjournaled.reduce((s, o) => s + Number(o.credits), 0);
 
-    if (drift > 0 && unjournaledCredits === drift) {
-      for (const o of unjournaled) {
-        recordCreditChange({
-          uid: user.uid,
-          delta: Number(o.credits),
-          reason: "purchase",
-          ref: o.orderNo,
-          note: "backfilled by credit audit (payment confirmed, journal write missed)",
-          // Filed at the window's own boundary: the balance being reconciled
-          // already contains these credits, so leaving the entry to fall into
-          // the *next* window would count the same purchase twice and read as a
-          // drop tomorrow.
-          at: windowEnd,
-        });
-      }
-      found.push({
-        ...base,
-        kind: "unjournaled_purchase",
-        severity: "warning",
-        drift,
-        detail: {
-          backfilledOrders: unjournaled.map((o) => o.orderNo),
-          backfilledCredits: unjournaledCredits,
-        },
-      });
-    } else {
-      found.push({
-        ...base,
-        kind: drift > 0 ? "unexplained_increase" : "unexplained_decrease",
-        severity: drift > 0 ? "critical" : "warning",
-        drift,
-        detail: {
-          window: { from: windowStart, to: windowEnd },
-          ledgerEntries: entries.map((e) => ({
-            id: e.id,
-            delta: e.delta,
-            reason: e.reason,
-            ref: e.ref,
-            at: e.createdAt,
-          })),
-          unjournaledPaidCredits: unjournaledCredits,
-        },
+  // The credits did arrive and only the journal write was lost: file it so
+  // tomorrow reconciles, and read it as bookkeeping rather than theft.
+  const backfilled = unjournaled.length > 0 && drift > 0 && unjournaledCredits === drift;
+  if (backfilled) {
+    for (const o of unjournaled) {
+      recordCreditChange({
+        uid: user.uid,
+        delta: Number(o.credits),
+        reason: "purchase",
+        ref: o.orderNo,
+        note: "backfilled by credit audit (payment confirmed, journal write missed)",
+        // Filed at the window's own boundary: the balance being reconciled
+        // already contains these credits, so leaving the entry to fall into
+        // the *next* window would count the same purchase twice and read as a
+        // drop tomorrow.
+        at: windowEnd,
       });
     }
+    found.push({
+      ...base,
+      kind: "unjournaled_purchase",
+      severity: "warning",
+      drift,
+      detail: {
+        backfilledOrders: unjournaled.map((o) => o.orderNo),
+        backfilledCredits: unjournaledCredits,
+      },
+    });
+  } else if (drift !== 0) {
+    found.push({
+      ...base,
+      kind: drift > 0 ? "unexplained_increase" : "unexplained_decrease",
+      severity: drift > 0 ? "critical" : "warning",
+      drift,
+      detail: {
+        window: { from: windowStart, to: windowEnd },
+        ledgerEntries: entries.map((e) => ({
+          id: e.id,
+          delta: e.delta,
+          reason: e.reason,
+          ref: e.ref,
+          at: e.createdAt,
+        })),
+        unjournaledPaidCredits: unjournaledCredits,
+      },
+    });
+  }
+
+  // Money confirmed, balance unmoved (or moved by some unrelated amount). The
+  // credits are never granted from here — an audit that hands out credits is a
+  // credit-granting API with extra steps, and that is the thing being guarded
+  // against. A human grants them with POST /adjust.
+  if (unjournaled.length > 0 && !backfilled) {
+    found.push({
+      ...base,
+      kind: "uncredited_payment",
+      severity: "critical",
+      drift: -unjournaledCredits,
+      detail: {
+        owedCredits: unjournaledCredits,
+        // With no drift at all, the balance provably never moved for these
+        // orders. With drift, it moved by the wrong amount and a human has to
+        // decide how much of it was this.
+        balanceUnmoved: drift === 0,
+        orders: unjournaled.map((o) => ({
+          orderNo: o.orderNo,
+          credits: o.credits,
+          amt: o.amt,
+          tradeNo: o.tradeNo,
+          paidAt: o.paidAt,
+        })),
+      },
+    });
+  }
+
+  // ── 3. Did the balance ever leave the range the journal allows? ─────────
+  // Each entry records the balance read back straight after its own write, so
+  // the journal carries a handful of directly observed balances from *during*
+  // the day. Their order is not trustworthy — concurrent requests journal in
+  // whatever order they finish — but the envelope is: from the previous
+  // snapshot, no interleaving of these deltas can put the balance above
+  // prev + (everything granted) or below prev + (everything spent). A reading
+  // outside it is a balance change nothing in the journal accounts for.
+  //
+  // This is what catches an attacker who covers their tracks: mint credits at
+  // 10:00, spend them through the normal endpoint, put the balance back before
+  // 03:30. Both snapshots agree and the spends are honestly journaled, so the
+  // day-over-day comparison reconciles to zero — but the balances observed while
+  // spending are far above anything the day's deltas could have reached.
+  const ceiling = previousCredits + entries.reduce((s, e) => s + Math.max(e.delta, 0), 0);
+  const floor = previousCredits + entries.reduce((s, e) => s + Math.min(e.delta, 0), 0);
+  for (const e of entries) {
+    if (e.balanceAfter === null || e.balanceAfter === undefined) continue;
+    if (e.balanceAfter <= ceiling && e.balanceAfter >= floor) continue;
+    const above = e.balanceAfter > ceiling;
+    found.push({
+      ...base,
+      kind: "ledger_balance_mismatch",
+      severity: above ? "critical" : "warning",
+      drift: e.balanceAfter - (above ? ceiling : floor),
+      detail: {
+        ledgerId: e.id,
+        reason: e.reason,
+        ref: e.ref,
+        observedBalance: e.balanceAfter,
+        allowedRange: [floor, ceiling],
+        at: e.createdAt,
+      },
+    });
   }
 
   return found;
@@ -516,13 +664,64 @@ const markAnomaly = db.prepare(
   "UPDATE credit_anomalies SET status = ?, resolution = ?, resolvedAt = ? WHERE id = ?"
 );
 
+// ── Retention ───────────────────────────────────────────────────────────────
+// One row per user per day on an 8 GB disk shared with the analysis database, so
+// snapshots are swept. Two things are deliberately never swept: the ledger,
+// which is the record everything else is checked against, and any user's most
+// recent snapshot — dropping that would re-baseline the account on the next run,
+// quietly accepting whatever its balance had become in the meantime.
+const pruneSnapshots = db.prepare(`
+  DELETE FROM credit_snapshots
+   WHERE takenAt < ?
+     AND takenAt < (SELECT MAX(s.takenAt) FROM credit_snapshots s
+                     WHERE s.uid = credit_snapshots.uid)
+`);
+// Runs that found nothing carry no information once they are out of retention.
+// Ones that did are kept: credit_anomalies points at them.
+const pruneRuns = db.prepare(`
+  DELETE FROM credit_audit_runs
+   WHERE startedAt < ?
+     AND id NOT IN (SELECT runId FROM credit_anomalies)
+`);
+
+function pruneHistory(): { snapshots: number; runs: number } | null {
+  if (!Number.isFinite(RETENTION_DAYS) || RETENTION_DAYS <= 0) return null;
+  const cutoff = new Date(Date.now() - RETENTION_DAYS * 86_400_000).toISOString();
+  try {
+    return {
+      snapshots: pruneSnapshots.run(cutoff).changes,
+      runs: pruneRuns.run(cutoff).changes,
+    };
+  } catch (err) {
+    // Housekeeping must never be the reason an audit reports failure.
+    console.error("credit-audit: prune failed —", (err as Error).message);
+    return null;
+  }
+}
+
+let inFlight: Promise<AuditRunSummary> | null = null;
+
 /**
  * Snapshot every balance and reconcile it against each user's previous snapshot
  * plus the ledger entries since. Safe to run more than once a day: the snapshot
  * upserts on (date, uid) and the second run's window starts where the first
  * one's ended.
+ *
+ * Concurrent callers share one pass. The scheduled run and a POST /run can land
+ * together, and while the claw-back itself is safe under that (it re-reads the
+ * balance inside a transaction), two passes over the same window would file the
+ * same anomaly twice and leave a second run half-reconciling a window the first
+ * had already corrected.
  */
-export async function runCreditAudit(trigger = "manual"): Promise<AuditRunSummary> {
+export function runCreditAudit(trigger = "manual"): Promise<AuditRunSummary> {
+  if (inFlight) return inFlight;
+  inFlight = executeRun(trigger).finally(() => {
+    inFlight = null;
+  });
+  return inFlight;
+}
+
+async function executeRun(trigger: string): Promise<AuditRunSummary> {
   const startedAt = new Date().toISOString();
   const auditDate = auditDateFor(new Date());
   const runId = Number(insertRun.run(auditDate, trigger, startedAt).lastInsertRowid);
@@ -533,15 +732,42 @@ export async function runCreditAudit(trigger = "manual"): Promise<AuditRunSummar
     // rather than being credited to tomorrow. Candidates are re-checked below.
     const takenAt = new Date().toISOString();
 
-    const prev = new Map<string, { credits: number; takenAt: string; snapshotDate: string }>();
+    const prev = new Map<
+      string,
+      { credits: number; takenAt: string; snapshotDate: string; runId: number | null }
+    >();
     for (const r of previousSnapshots.all(takenAt) as any[]) {
-      prev.set(r.uid, { credits: r.credits, takenAt: r.takenAt, snapshotDate: r.snapshotDate });
+      prev.set(r.uid, {
+        credits: r.credits,
+        takenAt: r.takenAt,
+        snapshotDate: r.snapshotDate,
+        runId: r.runId,
+      });
     }
 
     let baselined = 0;
     const candidates: Anomaly[] = [];
 
     for (const user of users) {
+      if (user.rawCredits !== undefined) {
+        // Nothing sensible to reconcile against, and snapshotting it would make
+        // the garbage tomorrow's baseline. Report it and leave the account's
+        // last good snapshot standing.
+        candidates.push({
+          uid: user.uid,
+          email: user.email,
+          kind: "invalid_balance",
+          severity: "critical",
+          previousCredits: prev.get(user.uid)?.credits ?? null,
+          currentCredits: null,
+          ledgerDelta: null,
+          expectedCredits: null,
+          drift: null,
+          detail: { rawCredits: String(user.rawCredits), type: typeof user.rawCredits },
+        });
+        continue;
+      }
+
       const before = prev.get(user.uid);
       if (!before) {
         // First time we've seen this account: nothing to compare against, so this
@@ -558,13 +784,15 @@ export async function runCreditAudit(trigger = "manual"): Promise<AuditRunSummar
     // account is one way to try to re-claim the signup seed. Only accounts present
     // at the *previous run* count: a user's last snapshot lives on forever, so
     // comparing against all of them would re-report every old deletion nightly.
-    const lastRunAt = [...prev.values()].reduce(
-      (max, p) => (p.takenAt > max ? p.takenAt : max),
-      ""
+    // Keyed on runId rather than takenAt, because takenAt is per user now and a
+    // run's rows no longer all share one instant.
+    const lastRunId = [...prev.values()].reduce(
+      (max, p) => (p.runId !== null && p.runId > max ? p.runId : max),
+      -1
     );
     const seen = new Set(users.map((u) => u.uid));
     for (const [uid, before] of prev) {
-      if (seen.has(uid) || before.takenAt !== lastRunAt) continue;
+      if (seen.has(uid) || before.runId !== lastRunId) continue;
       candidates.push({
         uid,
         email: null,
@@ -583,22 +811,31 @@ export async function runCreditAudit(trigger = "manual"): Promise<AuditRunSummar
     // landing while we paged through Firestore would otherwise page someone at
     // 03:30 over a race, not a break-in.
     const confirmed: Anomaly[] = [];
+    // Balances the recheck re-read, and when. A second read is strictly later and
+    // it is the one that settled the question, so it — not the paging read — is
+    // what gets snapshotted. Otherwise a race we correctly dismissed tonight
+    // becomes tomorrow's baseline as a figure this run already judged wrong, and
+    // reappears as drift in the opposite direction.
+    const rechecked = new Map<string, { credits: number; at: string }>();
     for (const a of candidates) {
-      if (a.kind !== "unexplained_increase" && a.kind !== "unexplained_decrease") {
+      if (!RECHECK_KINDS.has(a.kind)) {
         confirmed.push(a);
         continue;
       }
       const recheckAt = new Date().toISOString();
       const nowCredits = await readBalance(a.uid);
+      rechecked.set(a.uid, { credits: nowCredits, at: recheckAt });
       const fresh = reconcileUser(
         { uid: a.uid, email: a.email, credits: nowCredits },
         a.previousCredits as number,
         prev.get(a.uid)!.takenAt,
         recheckAt
       );
-      // Still drifting the same way → real. Explained by a payment that landed
+      // Still saying the same thing → real. Explained by a payment that landed
       // mid-run → downgraded to the (now backfilled) bookkeeping warning. Gone
-      // → it was the race, drop it.
+      // → it was the race, drop it. A payment that finished crediting between the
+      // two reads takes the same route: the fresh pass finds the ledger row and
+      // reports nothing.
       const still =
         fresh.find((x) => x.kind === a.kind) ??
         fresh.find((x) => x.kind === "unjournaled_purchase");
@@ -610,10 +847,18 @@ export async function runCreditAudit(trigger = "manual"): Promise<AuditRunSummar
     // has to be what tomorrow starts from.
     const writeSnapshots = db.transaction((rows: FsUser[]) => {
       for (const u of rows) {
-        upsertSnapshot.run(auditDate, u.uid, u.email, u.credits, takenAt);
+        const r = rechecked.get(u.uid);
+        upsertSnapshot.run(
+          auditDate,
+          u.uid,
+          u.email,
+          r?.credits ?? u.credits,
+          r?.at ?? takenAt,
+          runId
+        );
       }
     });
-    writeSnapshots(users);
+    writeSnapshots(users.filter((u) => u.rawCredits === undefined));
 
     const stored = db.transaction((rows: Anomaly[]) =>
       rows.map((a) =>
@@ -645,15 +890,16 @@ export async function runCreditAudit(trigger = "manual"): Promise<AuditRunSummar
         // rewritten to the corrected figure, so today's books close balanced.
         // Deriving that from wall-clock ordering instead would leave the
         // correction in a gap between the two windows on a fast run.
+        const at = rechecked.get(a.uid)?.at ?? takenAt;
         const ok = await clawBack(
           a.uid,
           a.currentCredits as number,
           a.expectedCredits as number,
           stored[i],
-          takenAt
+          at
         );
         if (ok) {
-          upsertSnapshot.run(auditDate, a.uid, a.email, a.expectedCredits, takenAt);
+          upsertSnapshot.run(auditDate, a.uid, a.email, a.expectedCredits, at, runId);
         }
         markAnomaly.run(
           ok ? "corrected" : "open",
@@ -678,6 +924,14 @@ export async function runCreditAudit(trigger = "manual"): Promise<AuditRunSummar
       null,
       runId
     );
+
+    const pruned = pruneHistory();
+    if (pruned && (pruned.snapshots || pruned.runs)) {
+      console.log(
+        `credit-audit: pruned ${pruned.snapshots} snapshots and ${pruned.runs} empty runs ` +
+          `older than ${RETENTION_DAYS} days`
+      );
+    }
 
     const summary: AuditRunSummary = {
       runId,
@@ -905,6 +1159,82 @@ creditAuditRouter.get("/snapshots", (req, res) => {
           )
           .all(limit)
   );
+});
+
+// Confirmed payments with nothing in the journal to match, all-time. The nightly
+// `uncredited_payment` finding only ever sees one window, so it names each of
+// these exactly once and then the window moves past them; this is the standing
+// list of who is still owed credits, and it empties itself as they are granted.
+const uncreditedOrders = lazy(`
+  SELECT o.orderNo, o.uid, o.credits, o.amt, o.tradeNo, o.paidAt, o.createdAt
+    FROM newebpay_orders o
+   WHERE o.status = 'paid'
+     AND NOT EXISTS (SELECT 1 FROM credit_ledger l
+                      WHERE l.reason = 'purchase' AND l.ref = o.orderNo)
+   ORDER BY COALESCE(o.paidAt, o.createdAt) DESC
+   LIMIT ?
+`);
+
+creditAuditRouter.get("/uncredited-orders", (req, res) => {
+  const limit = Math.min(Number(req.query.limit ?? 200), 1000);
+  res.json(uncreditedOrders().all(limit));
+});
+
+const findLedgerByRef = db.prepare(
+  "SELECT id FROM credit_ledger WHERE reason = 'purchase' AND ref = ?"
+);
+/** Orders being granted right now — see the comment in the route below. */
+const grantsInFlight = new Set<string>();
+
+/**
+ * Grant the credits for a payment that was confirmed but never delivered: the
+ * remediation for `uncredited_payment`. Deliberately not automatic — the audit
+ * never hands out credits — and deliberately journaled as the `purchase` it
+ * should have been, under the order's own number, so the unique (reason, ref)
+ * index makes a repeat call a no-op and the order drops off the list above.
+ */
+creditAuditRouter.post("/uncredited-orders/:orderNo/credit", async (req, res) => {
+  const orderNo = req.params.orderNo;
+  const order = findPaidOrder().get(orderNo) as PaidOrder | undefined;
+  if (!order) return res.status(404).json({ error: "no paid order with that number" });
+  if (findLedgerByRef.get(orderNo)) {
+    return res.status(409).json({ error: "order already credited" });
+  }
+  // The ledger row is only written once Firestore confirms, so two calls arriving
+  // together would both get past that check. One backend process, so a set closes
+  // the window; the unique index handles everything after the first completes.
+  if (grantsInFlight.has(orderNo)) {
+    return res.status(409).json({ error: "grant already in progress" });
+  }
+
+  grantsInFlight.add(orderNo);
+  try {
+    const ref = getFirestore().collection("users").doc(order.uid);
+    const balance = await getFirestore().runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) throw new Error("user_not_found");
+      const next = Number(snap.data()?.credits ?? 0) + Number(order.credits);
+      tx.update(ref, { credits: next });
+      return next;
+    });
+    recordCreditChange({
+      uid: order.uid,
+      delta: Number(order.credits),
+      reason: "purchase",
+      ref: orderNo,
+      balanceAfter: balance,
+      note: `granted by admin for confirmed payment ${order.tradeNo ?? "?"} · NT$${order.amt}`,
+    });
+    console.warn(
+      `credit-audit: granted ${order.credits} to ${order.uid} for uncredited order ${orderNo}`
+    );
+    res.json({ orderNo, uid: order.uid, credits: order.credits, balance });
+  } catch (err) {
+    const message = (err as Error).message;
+    res.status(message === "user_not_found" ? 404 : 500).json({ error: message });
+  } finally {
+    grantsInFlight.delete(orderNo);
+  }
 });
 
 /** Run the audit now (e.g. after an incident, or to verify a fix). */

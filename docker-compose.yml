@@ -67,6 +67,9 @@ services:
       - CREDIT_AUDIT_TZ_OFFSET_MIN=${CREDIT_AUDIT_TZ_OFFSET_MIN:-480}
       # Off by default: a bug in a credit path would otherwise delete real balances.
       - CREDIT_AUDIT_AUTO_CLAMP=${CREDIT_AUDIT_AUTO_CLAMP:-false}
+      # Snapshot history kept; 0 disables. Never prunes the ledger, the anomaly
+      # record, or any user's most recent snapshot.
+      - CREDIT_AUDIT_RETENTION_DAYS=${CREDIT_AUDIT_RETENTION_DAYS:-180}
       - CREDIT_AUDIT_WEBHOOK_URL=${CREDIT_AUDIT_WEBHOOK_URL:-}
       # Guards /api/admin/credit-audit/*. Unset ⇒ those routes answer 503.
       - ADMIN_API_TOKEN=${ADMIN_API_TOKEN:-}
