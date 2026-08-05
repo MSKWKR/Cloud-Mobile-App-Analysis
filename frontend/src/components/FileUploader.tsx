@@ -15,6 +15,7 @@ import {
   RotateCcw,
 } from "lucide-react";
 import { getIdToken } from "../firebase/auth";
+import PackedApkNotice from "./PackedApkNotice";
 
 type AnalysisType = "static" | "dynamic";
 
@@ -368,6 +369,8 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUpload }) => {
                   );
                 })}
               </div>
+              {/* Set expectations before the upload is paid for, not after */}
+              {analysisType === "static" && <PackedApkNotice />}
             </div>
 
             <div

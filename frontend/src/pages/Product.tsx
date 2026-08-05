@@ -10,6 +10,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { Button } from "../components/ui/button";
+import PackedApkNotice from "../components/PackedApkNotice";
 import ThemeToggle from "../components/ThemeToggle";
 
 const COMPANY = "SUPREMA TECHNOLOGIES LTD";
@@ -146,6 +147,7 @@ function Product() {
             </p>
           </div>
           <WorkflowRow steps={staticWorkflow} />
+          <PackedApkNotice className="mx-auto w-full max-w-3xl" />
         </section>
 
         <section className="flex flex-col gap-6">

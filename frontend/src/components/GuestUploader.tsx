@@ -18,6 +18,7 @@ import {
   FileSearch,
   Zap,
 } from "lucide-react";
+import PackedApkNotice from "./PackedApkNotice";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -360,6 +361,8 @@ const GuestUploader: React.FC<GuestUploaderProps> = ({ onSwitchToAuth }) => {
                 );
               })}
             </div>
+            {/* Set expectations before the upload is paid for, not after */}
+            {analysisType === "static" && <PackedApkNotice />}
           </div>
 
           <div

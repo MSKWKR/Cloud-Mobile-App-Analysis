@@ -11,6 +11,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { getIdToken } from "../firebase/auth";
 import { auth } from "../firebase/config";
+import PackedApkNotice from "./PackedApkNotice";
 
 // Structure of an upload entry, might need to adjust based on actual backend response
 interface UploadEntry {
@@ -256,6 +257,10 @@ const UploadHistory: React.FC<UploadHistoryProps> = ({ refreshSignal }) => {
                     </div>
                     {/* Display file hash */}
                     <p>Hash: {upload.hash}</p>
+
+                    {/* Why an APK's static report can come back thin */}
+                    {upload.filename.toLowerCase().endsWith(".apk") &&
+                      upload.analysisType === "static" && <PackedApkNotice />}
 
                     {/* Show analyze button */}
                     <div className="flex justify-end">
