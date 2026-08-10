@@ -2,3 +2,4 @@ serviceAccountKey.json
 node_modules/
 *swp
 tests/
+data/
