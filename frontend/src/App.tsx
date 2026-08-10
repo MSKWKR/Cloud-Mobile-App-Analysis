@@ -51,7 +51,9 @@ function App() {
 
   const verified = !!user?.emailVerified;
 
-  const handleUpload = () => setRefresh((prev) => prev + 1);
+  // Bumped whenever an upload or an analysis changes what the page should show —
+  // the history list and the credit balance both key off it.
+  const refreshAccount = () => setRefresh((prev) => prev + 1);
 
   return (
     <div className="min-h-screen w-full flex items-center justify-center bg-gradient-to-br from-slate-100 via-background to-indigo-50 dark:from-[#070b16] dark:via-background dark:to-[#0c1226] p-4">
@@ -106,8 +108,9 @@ function App() {
               </div>
             </div>
 
-            <FileUploader onUpload={handleUpload} />
-            <UploadHistory refreshSignal={refresh} />
+            <FileUploader onUpload={refreshAccount} />
+            {/* Analyses spend credits, so a run has to refresh the balance too */}
+            <UploadHistory refreshSignal={refresh} onCreditsChanged={refreshAccount} />
           </>
         )}
 

@@ -37,8 +37,21 @@ import { getFirestore } from "firebase-admin/firestore";
 import { db } from "./db";
 
 // ── Config ──────────────────────────────────────────────────────────────────
-/** Credits a brand-new account is seeded with. The audit enforces this exact value. */
-export const SIGNUP_CREDITS = Number(process.env.SIGNUP_CREDITS ?? 10);
+/**
+ * Credits a brand-new account is seeded with. The audit enforces this exact
+ * value. Zero by default: free signup credits were withdrawn, so a new account
+ * seeds nothing and journals nothing.
+ */
+export const SIGNUP_CREDITS = Number(process.env.SIGNUP_CREDITS ?? 0);
+
+/**
+ * Seed amount granted before free signup credits were withdrawn. A `signup`
+ * entry is re-examined whenever it falls inside an open window, so without this
+ * every account created in the day or so before that change would be reported
+ * as `invalid_signup_amount` — critical severity — on the next nightly run.
+ * Set to 0 once no window can still contain a pre-change signup.
+ */
+const LEGACY_SIGNUP_CREDITS = Number(process.env.LEGACY_SIGNUP_CREDITS ?? 10);
 
 const ENABLED = (process.env.CREDIT_AUDIT_ENABLED ?? "true") !== "false";
 /** Wall-clock time of the daily run, "HH:MM", in the offset below. */
@@ -474,7 +487,9 @@ function reconcileUser(
           detail: { ledgerId: e.id, signupGrants: seeds },
         });
       }
-      if (e.delta !== SIGNUP_CREDITS) {
+      // The legacy amount is accepted as well, so seeds handed out before free
+      // signup credits were withdrawn are not retroactively called forgeries.
+      if (e.delta !== SIGNUP_CREDITS && e.delta !== LEGACY_SIGNUP_CREDITS) {
         found.push({
           ...base,
           kind: "invalid_signup_amount",

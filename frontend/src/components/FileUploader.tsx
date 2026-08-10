@@ -67,9 +67,16 @@ const RESULT_META: Record<string, ResultMeta> = {
   uploaded_for_analysis: {
     icon: CheckCircle,
     tint: "bg-green-500/15 text-green-400",
-    title: "Uploaded for analysis",
-    desc: "Your file was uploaded successfully and is queued for analysis.",
-    btnLabel: "Analyze another file",
+    title: "Uploaded",
+    desc: "Press Analyze in the history below to run it — that is when a credit is charged.",
+    btnLabel: "Upload another file",
+  },
+  no_credits: {
+    icon: AlertTriangle,
+    tint: "bg-amber-500/15 text-amber-400",
+    title: "No credits left",
+    desc: "You need at least one credit to upload. Buy credits to continue.",
+    btnLabel: "Back",
   },
   error: {
     icon: AlertTriangle,
@@ -249,40 +256,16 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUpload }) => {
       };
 
       // Handle successful upload
-      xhr.onload = async () => {
+      xhr.onload = () => {
         setProgress(100);
         if (xhr.status >= 200 && xhr.status < 300) {
+          // Uploading is free — the credit is spent server-side when the
+          // analysis is actually dispatched, so nothing is charged here.
           setStatus("uploaded_for_analysis");
-
-          // Consume a credit
-          try {
-            const token = await getIdToken();
-            if (!token) throw new Error("User not logged in");
-
-            const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/consumeCredit`, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${token}`,
-                "Content-Type": "application/json",
-              },
-              // Recorded in the credit ledger so a spend can be traced back to
-              // the analysis it paid for (server/credit_audit.ts).
-              body: JSON.stringify({ hash, type: analysisType }),
-            });
-
-            if (!res.ok) {
-              console.error("Failed to consume credit:", await res.json());
-            } else {
-              // Optionally: get remaining credits from response
-              const data = await res.json();
-              console.log("Remaining credits:", data.remainingCredits);
-            }
-          } catch (err) {
-            console.error("Error consuming credit:", err);
-          }
-
           // Notify parent to refresh UploadHistory **and UserCredits**
           onUpload?.();
+        } else if (xhr.status === 402) {
+          setStatus("no_credits");
         } else {
           setStatus("error");
           console.error("Upload failed:", xhr.statusText);
@@ -338,7 +321,10 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUpload }) => {
         {status === "idle" && (
           <div className="space-y-5">
             <div className="space-y-3">
-              <p className="text-sm font-medium">Choose analysis type</p>
+              <div className="flex items-baseline justify-between gap-2">
+                <p className="text-sm font-medium">Choose analysis type</p>
+                <p className="text-xs text-muted-foreground">1 credit per analysis</p>
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 {ANALYSIS_OPTIONS.map((opt) => {
                   const Icon = opt.icon;

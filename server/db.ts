@@ -29,6 +29,7 @@ db.exec(`
     hash         TEXT NOT NULL,
     status       TEXT NOT NULL DEFAULT 'pending'
                  CHECK (status IN ('pending','analyzing','done','error')),
+    creditSpent  INTEGER NOT NULL DEFAULT 0,  -- 1 once a credit has paid for this analysis
     taskId       TEXT,
     uploadTime   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     UNIQUE (user, hash, analysisType)
@@ -54,3 +55,15 @@ db.exec(`
   CREATE UNIQUE INDEX IF NOT EXISTS guest_jobs_downloadToken
     ON guest_jobs (downloadToken) WHERE downloadToken IS NOT NULL;
 `);
+
+// `file_meta.creditSpent` arrived when the charge moved from upload time to
+// analysis time. Every row that predates the column was already paid for at
+// upload, so they are backfilled as paid — deploying this must never charge
+// someone a second time for an analysis they have already bought.
+const fileMetaColumns = db.prepare("PRAGMA table_info(file_meta)").all() as { name: string }[];
+if (!fileMetaColumns.some((c) => c.name === "creditSpent")) {
+  db.exec(`
+    ALTER TABLE file_meta ADD COLUMN creditSpent INTEGER NOT NULL DEFAULT 0;
+    UPDATE file_meta SET creditSpent = 1;
+  `);
+}

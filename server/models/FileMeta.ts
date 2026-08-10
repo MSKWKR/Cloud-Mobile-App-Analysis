@@ -11,6 +11,8 @@ export interface FileMetaRow {
   reportPath: string;
   hash: string;
   status: FileStatus;
+  /** 1 once a credit has paid for this analysis. Re-running it is then free. */
+  creditSpent: number;
   taskId: string | null;
   uploadTime: string; // ISO 8601
 }
@@ -30,6 +32,11 @@ const insertStmt = db.prepare(`
   VALUES (@user, @filename, @analysisType, @filePath, @reportPath, @hash, @status)
 `);
 const findByIdStmt = db.prepare("SELECT * FROM file_meta WHERE id = ?");
+const claimStmt = db.prepare(
+  "UPDATE file_meta SET status = 'analyzing' WHERE id = ? AND status = 'pending'"
+);
+const releaseStmt = db.prepare("UPDATE file_meta SET status = 'pending' WHERE id = ?");
+const markCreditSpentStmt = db.prepare("UPDATE file_meta SET creditSpent = 1 WHERE id = ?");
 
 export const FileMeta = {
   create(data: {
@@ -45,6 +52,10 @@ export const FileMeta = {
     return findByIdStmt.get(info.lastInsertRowid) as FileMetaRow;
   },
 
+  findById(id: number): FileMetaRow | undefined {
+    return findByIdStmt.get(id) as FileMetaRow | undefined;
+  },
+
   findOne(filter: Filter): FileMetaRow | undefined {
     const { sql, values } = where(filter);
     return db
@@ -57,6 +68,25 @@ export const FileMeta = {
     return db
       .prepare(`SELECT * FROM file_meta WHERE ${sql} ORDER BY uploadTime DESC, id DESC`)
       .all(...values) as FileMetaRow[];
+  },
+
+  /**
+   * Move a row from `pending` to `analyzing` in a single statement. Returns
+   * false if another request got there first — this is what stops a
+   * double-clicked Analyze button from dispatching, and paying for, one
+   * analysis twice.
+   */
+  claim(id: number): boolean {
+    return claimStmt.run(id).changes === 1;
+  },
+
+  /** Give a claimed row back, for when the credit charge fails after claiming. */
+  release(id: number): void {
+    releaseStmt.run(id);
+  },
+
+  markCreditSpent(id: number): void {
+    markCreditSpentStmt.run(id);
   },
 
   update(id: number, patch: Partial<Pick<FileMetaRow, "status" | "taskId">>): void {

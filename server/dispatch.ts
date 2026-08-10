@@ -29,12 +29,18 @@ interface ScanReport {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-export async function analyzeIOSStatic(fileHash: string, analysisType: string = "static") {
+// Every analyze function takes the `file_meta` row id, never the file hash. Two
+// users can upload the same binary — the table is unique on (user, hash,
+// analysisType), not on the hash — so a lookup by hash alone would resolve to
+// whichever row was created first and analyse, and overwrite, the wrong user's
+// report while the caller's own row sat in `analyzing` forever. The caller has
+// already paid a credit for a specific row, so that row is what runs.
+export async function analyzeIOSStatic(fileId: number) {
   let tmpPath: string | null = null;
   try {
     // Fetch the file document
-    const fileDoc = FileMeta.findOne({ hash: fileHash, analysisType });
-    if (!fileDoc) throw new Error(`No file found with hash ${fileHash}`);
+    const fileDoc = FileMeta.findById(fileId);
+    if (!fileDoc) throw new Error(`No file found with id ${fileId}`);
     if (fileDoc.analysisType !== "static" || !fileDoc.filename.endsWith(".ipa"))
       throw new Error(`File ${fileDoc.filename} is not eligible for IPA static analysis`);
 
@@ -101,8 +107,7 @@ export async function analyzeIOSStatic(fileHash: string, analysisType: string = 
 
   } catch (err) {
     console.error("Error in analyzeIOSStatic:", err);
-    const fileDoc = FileMeta.findOne({ hash: fileHash });
-    if (fileDoc) FileMeta.update(fileDoc.id, { status: "error" });
+    FileMeta.update(fileId, { status: "error" });
     throw err;
   } finally {
     if (tmpPath) await fs.promises.unlink(tmpPath).catch(() => {});
@@ -110,10 +115,10 @@ export async function analyzeIOSStatic(fileHash: string, analysisType: string = 
 }
 
 
-export async function analyzeAndroidStatic(fileHash: string, analysisType: string = "static") {
+export async function analyzeAndroidStatic(fileId: number) {
   try {
-    const fileDoc = FileMeta.findOne({ hash: fileHash, analysisType });
-    if (!fileDoc) throw new Error(`No file found with hash ${fileHash}`);
+    const fileDoc = FileMeta.findById(fileId);
+    if (!fileDoc) throw new Error(`No file found with id ${fileId}`);
     if (fileDoc.analysisType !== "static" || !fileDoc.filename.endsWith(".apk"))
       throw new Error(`File ${fileDoc.filename} is not eligible for APK static analysis`);
 
@@ -174,17 +179,16 @@ export async function analyzeAndroidStatic(fileHash: string, analysisType: strin
 
   } catch (err) {
     console.error("Error in analyzeAndroidStatic:", err);
-    const fileDoc = FileMeta.findOne({ hash: fileHash });
-    if (fileDoc) FileMeta.update(fileDoc.id, { status: "error" });
+    FileMeta.update(fileId, { status: "error" });
     throw err;
   }
 }
 
-export async function analyzeAndroidDynamic(fileHash: string, analysisType: string = "dynamic") {
+export async function analyzeAndroidDynamic(fileId: number) {
   let tmpPath: string | null = null;
   try {
-    const fileDoc = FileMeta.findOne({ hash: fileHash, analysisType });
-    if (!fileDoc) throw new Error(`No file found with hash ${fileHash}`);
+    const fileDoc = FileMeta.findById(fileId);
+    if (!fileDoc) throw new Error(`No file found with id ${fileId}`);
     if (fileDoc.analysisType !== "dynamic" || !fileDoc.filename.endsWith(".apk"))
       throw new Error(`File ${fileDoc.filename} is not eligible for APK dynamic analysis`);
 
@@ -217,8 +221,7 @@ export async function analyzeAndroidDynamic(fileHash: string, analysisType: stri
 
   } catch (err) {
     console.error("Error in analyzeAndroidDynamic:", err);
-    const fileDoc = FileMeta.findOne({ hash: fileHash });
-    if (fileDoc) FileMeta.update(fileDoc.id, { status: "error" });
+    FileMeta.update(fileId, { status: "error" });
     throw err;
   } finally {
     if (tmpPath) await fs.promises.unlink(tmpPath).catch(() => {});
@@ -227,18 +230,18 @@ export async function analyzeAndroidDynamic(fileHash: string, analysisType: stri
 
 // Optional CLI support
 if (require.main === module) {
-  const hash = process.argv[2];
+  const fileId = Number(process.argv[2]);
   const mode = process.argv[3];
-  if (!hash || !mode) {
-    console.error("Usage: ts-node helper.ts <fileHash> <mode>");
+  if (!fileId || !mode) {
+    console.error("Usage: ts-node dispatch.ts <fileMetaId> <mode>");
     process.exit(1);
   }
 
   (async () => {
     try {
-      if (mode === "ios-static") await analyzeIOSStatic(hash);
-      else if (mode === "android-static") await analyzeAndroidStatic(hash);
-      else if (mode === "android-dynamic") await analyzeAndroidDynamic(hash);
+      if (mode === "ios-static") await analyzeIOSStatic(fileId);
+      else if (mode === "android-static") await analyzeAndroidStatic(fileId);
+      else if (mode === "android-dynamic") await analyzeAndroidDynamic(fileId);
       else throw new Error(`Unknown mode: ${mode}`);
     } catch (err) {
       console.error(err);

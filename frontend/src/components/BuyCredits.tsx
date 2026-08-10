@@ -12,7 +12,8 @@ interface CreditPackage {
   popular?: boolean;
 }
 
-// 1 credit = 1 upload = US$30, matching the /product page.
+// 1 credit = 1 analysis run = US$30, matching the /product page. Static and
+// dynamic analysis of the same file are two runs, and so two credits.
 // Package ids must stay in sync with VALID_PACKAGES in server/newebpay.ts.
 //
 // Prices are denominated in USD; NewebPay can only charge TWD, so the NT$ figure

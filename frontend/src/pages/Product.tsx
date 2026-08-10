@@ -199,17 +199,19 @@ function Product() {
             <h3 className="font-semibold text-foreground">Application Analysis</h3>
             <div className="my-4">
               <span className="text-5xl font-bold text-foreground">US$30</span>
-              <span className="text-muted-foreground"> / upload</span>
+              <span className="text-muted-foreground"> / analysis</span>
               <div className="text-muted-foreground mt-1">
                 billed in TWD at the current exchange rate
               </div>
             </div>
             <p className="text-sm text-muted-foreground mb-6">
-              Each upload includes full static and dynamic analysis of one IPA or
-              APK file with a downloadable PDF security report. Prices are listed
-              in US dollars. Payments are processed by NewebPay (藍新金流) and
-              charged in New Taiwan Dollars (TWD); the exact TWD amount is shown
-              before you pay.
+              One credit runs one analysis of one IPA or APK file and includes a
+              downloadable PDF security report. Static and dynamic analysis are
+              charged separately, so running both on the same file costs two
+              credits. Uploading a file is free — a credit is only spent when you
+              start an analysis. Prices are listed in US dollars. Payments are
+              processed by NewebPay (藍新金流) and charged in New Taiwan Dollars
+              (TWD); the exact TWD amount is shown before you pay.
             </p>
             <Button asChild className="w-full">
               <Link to="/app">Get Started</Link>
@@ -228,8 +230,9 @@ function Product() {
               <span className="font-semibold text-foreground">not</span> provide
               stored-value, e-wallet, or top-up services. Every payment on this
               platform is a prepaid fee for a specific service: one credit
-              corresponds to exactly one mobile application analysis (US$30,
-              charged in TWD at the exchange rate shown at checkout).
+              corresponds to exactly one mobile application analysis run (US$30,
+              charged in TWD at the exchange rate shown at checkout). Static and
+              dynamic analysis are separate services, each costing one credit.
             </p>
             <p>
               Credits have no cash value, are non-transferable, cannot be

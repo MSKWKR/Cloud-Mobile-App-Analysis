@@ -22,16 +22,22 @@ interface UploadEntry {
   filePath?: string;
   hash?: string;
   uploadTime?: string;
+  /** True once a credit has paid for this analysis — retrying it is then free. */
+  creditSpent?: boolean;
 }
 
 
 // Optional prop to trigger refresh from parent component
 interface UploadHistoryProps {
   refreshSignal?: number;
+  /** Called after an analysis spends a credit, so the header balance re-reads. */
+  onCreditsChanged?: () => void;
 }
 
-const UploadHistory: React.FC<UploadHistoryProps> = ({ refreshSignal }) => {
+const UploadHistory: React.FC<UploadHistoryProps> = ({ refreshSignal, onCreditsChanged }) => {
   const [uploads, setUploads] = useState<UploadEntry[]>([]);
+  // Per-row failure message, keyed by upload id (e.g. "not enough credits").
+  const [notices, setNotices] = useState<Record<string, string>>({});
 
   // Fetch upload history from backend
   const fetchUploads = async () => {
@@ -92,7 +98,24 @@ const UploadHistory: React.FC<UploadHistoryProps> = ({ refreshSignal }) => {
         },
         body: JSON.stringify({ hash: upload.hash }),
       });
-      if (!res.ok) throw new Error("Failed to trigger analysis");
+
+      // A credit is charged here, server-side, so this is where a user finds out
+      // they have run out — 402 rather than a generic failure.
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({} as { error?: string }));
+        setNotices((prev) => ({
+          ...prev,
+          [upload.id]:
+            res.status === 402
+              ? "Not enough credits to run this analysis. Buy more to continue."
+              : body.error ?? "Failed to trigger analysis",
+        }));
+        return;
+      }
+
+      setNotices(({ [upload.id]: _removed, ...rest }) => rest);
+      // The balance just moved; ask the header to re-read it.
+      onCreditsChanged?.();
 
       // Start polling until the file is done
       const pollInterval = 3000; // 3 seconds
@@ -262,6 +285,11 @@ const UploadHistory: React.FC<UploadHistoryProps> = ({ refreshSignal }) => {
                     {upload.filename.toLowerCase().endsWith(".apk") &&
                       upload.analysisType === "static" && <PackedApkNotice />}
 
+                    {/* Why an analysis could not be started (e.g. no credits) */}
+                    {notices[upload.id] && (
+                      <p className="text-sm text-amber-500">{notices[upload.id]}</p>
+                    )}
+
                     {/* Show analyze button */}
                     <div className="flex justify-end">
                       {upload.status === "pending" && (
@@ -270,7 +298,8 @@ const UploadHistory: React.FC<UploadHistoryProps> = ({ refreshSignal }) => {
                           variant="outline"
                           onClick={() => handleAnalyze(upload)}
                         >
-                          Analyze
+                          {/* Already paid for — a retry of a failed run is free */}
+                          {upload.creditSpent ? "Analyze" : "Analyze · 1 credit"}
                         </Button>
                       )}
                       {upload.status === "done" && (

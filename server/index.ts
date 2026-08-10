@@ -21,7 +21,6 @@ import {
   creditAuditRouter,
   SIGNUP_CREDITS,
 } from "./credit_audit";
-import crypto from "crypto";
 
 initializeApp({
   credential: cert(serviceAccount as ServiceAccount),
@@ -66,8 +65,9 @@ async function getUserCredits(uid: string): Promise<number> {
 }
 
 // Atomically decrement one credit, only if the balance is > 0.
-// Runs in a Firestore transaction so concurrent uploads can't double-spend.
-async function consumeCredit(uid: string, note?: string) {
+// Runs in a Firestore transaction so concurrent analyses can't double-spend.
+// `ref` is the natural key of the thing being paid for — see the journal note below.
+async function consumeCredit(uid: string, ref: string, note?: string) {
   const docRef = db.collection("users").doc(uid);
   const remaining = await db.runTransaction(async (tx) => {
     const snap = await tx.get(docRef);
@@ -84,14 +84,15 @@ async function consumeCredit(uid: string, note?: string) {
   // Journal the spend so the daily audit can reconcile the new balance
   // (server/credit_audit.ts). Unjournaled spends surface as an unexplained
   // *decrease*, which is a warning, not an alarm — but keep the books straight.
-  // The ref is a fresh uuid rather than the file hash: the same file can legally
-  // be analysed twice, and a unique (reason, ref) would silently swallow the
-  // second spend. The hash rides along in the note for tracing instead.
+  // The ref is the file_meta row being analysed, not the file hash: static and
+  // dynamic runs of one binary are separate rows, so both are journaled, while
+  // the unique (reason, ref) index makes a repeated charge for the *same*
+  // analysis impossible to double-count.
   recordCreditChange({
     uid,
     delta: -1,
     reason: "consume",
-    ref: `consume:${crypto.randomUUID()}`,
+    ref,
     balanceAfter: remaining,
     note: note ?? null,
   });
@@ -122,14 +123,31 @@ app.use("/api/admin/credit-audit", creditAuditRouter);
 // and delete the temp file. S3 is the durable store — no local uploads/reports dirs.
 const upload = multer({ dest: os.tmpdir(), defParamCharset: "utf8" } as any);
 
+// Uploading itself is free — the credit is charged when an analysis is run — but
+// an empty balance means nothing can ever be done with the file, so it is turned
+// away here rather than after multer has buffered the whole binary to disk.
+// Ordering matters: this must sit before `upload.single()` in the chain.
+const requireCredits = async (req: AuthRequest, res: Response, next: NextFunction) => {
+  if (!req.user) return res.status(401).json({ message: "Unauthorized" });
+  try {
+    if ((await getUserCredits(req.user.uid)) <= 0) {
+      return res.status(402).json({ message: "No credits left", error: "no_credits" });
+    }
+    next();
+  } catch (err) {
+    console.error("Credit check error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
 // S3 key schemes. These strings are stored in FileMeta.filePath / .reportPath.
 const uploadKey = (uid: string, hash: string, filename: string) =>
   `uploads/${uid}/${hash}/${filename}`;
 const reportKey = (uid: string, hash: string, analysisType: string) =>
   `reports/${uid}/${hash}/${analysisType}.json`;
 
-// Upload file
-app.post("/upload", verifyToken, upload.single("file"), async (req: AuthRequest, res: Response) => {
+// Upload file. Free — a credit is charged per analysis, not per upload.
+app.post("/upload", verifyToken, requireCredits, upload.single("file"), async (req: AuthRequest, res: Response) => {
   if (!req.user) return res.status(401).json({ message: "Unauthorized" });
 
   const file = req.file;
@@ -186,6 +204,9 @@ app.get("/uploads", verifyToken, async (req: AuthRequest, res: Response) => {
     analysisType: u.analysisType,
     filePath: u.filePath,
     status: u.status,
+    // Lets the UI say whether pressing Analyze will cost a credit — a retry of
+    // an analysis that was already paid for does not.
+    creditSpent: !!u.creditSpent,
     uploadTime: u.uploadTime,
   }));
 
@@ -249,96 +270,101 @@ app.post("/check-hash", verifyToken, async (req: AuthRequest, res: Response) => 
   }
 });
 
-app.post("/ios-static-analyze", verifyToken, async (req: AuthRequest, res: Response) => {
-  if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+/**
+ * The three analyze endpoints, which differ only in which engine they call and
+ * what they accept. This is where a credit is spent: one per analysis run, so a
+ * single APK analysed both statically and dynamically costs two — they are two
+ * separate `file_meta` rows and two separate pieces of work.
+ *
+ * A row is charged at most once, ever (`creditSpent`). Retrying a failed
+ * analysis re-runs it for free, which is why nothing here ever needs to hand a
+ * credit *back* — refunds would mean a positive ledger entry, and the audit
+ * treats grants it cannot match to outside evidence as critical
+ * (see "Credit integrity" in README.md).
+ */
+function analyzeHandler(opts: {
+  analysisType: string;
+  extension: string;
+  label: string;
+  run: (fileId: number) => Promise<unknown>;
+}) {
+  return async (req: AuthRequest, res: Response) => {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-  const { hash } = req.body;
-  if (!hash) return res.status(400).json({ error: "Missing hash" });
-
-    // Find the current user
-  const user = User.findById(req.user.uid);
-  if (!user) return res.status(401).json({ error: "User not found" });
-
-  const upload = FileMeta.findOne({ user:user.id, hash, analysisType: "static" });
-  if (!upload) return res.status(404).json({ error: "Upload not found" });
-  if (!(upload.filename.endsWith(".ipa") && upload.analysisType === "static"))
-    return res.status(400).json({ error: "Not eligible for analysis" });
-  if (upload.status !== "pending")
-    return res.status(400).json({ error: "File already analyzing or done" });
-
-  analyzeIOSStatic(hash)
-    .then(() => console.log("iOS Static Analysis completed"))
-    .catch(err => {
-      console.error("iOS Static Analysis Error:", err);
-      const doc = FileMeta.findOne({ user: user.id, hash });
-      if (doc) FileMeta.update(doc.id, { status: "error" });
-    });
-
-  FileMeta.update(upload.id, { status: "analyzing" });
-
-  res.json({ message: "Analysis triggered" });
-});
-
-app.post("/android-static-analyze", verifyToken, async (req: AuthRequest, res: Response) => {
-  if (!req.user) return res.status(401).json({ error: "Unauthorized" });
-
-  const { hash } = req.body;
-  if (!hash) return res.status(400).json({ error: "Missing hash" });
+    const { hash } = req.body;
+    if (!hash) return res.status(400).json({ error: "Missing hash" });
 
     // Find the current user
-  const user = User.findById(req.user.uid);
-  if (!user) return res.status(401).json({ error: "User not found" });
+    const user = User.findById(req.user.uid);
+    if (!user) return res.status(401).json({ error: "User not found" });
 
-  const upload = FileMeta.findOne({ user: user.id, hash, analysisType: "static" });
-  if (!upload) return res.status(404).json({ error: "Upload not found" });
-  if (!(upload.filename.endsWith(".apk") && upload.analysisType === "static"))
-    return res.status(400).json({ error: "Not eligible for analysis" });
-  if (upload.status !== "pending")
-    return res.status(400).json({ error: "File already analyzing or done" });
+    const upload = FileMeta.findOne({ user: user.id, hash, analysisType: opts.analysisType });
+    if (!upload) return res.status(404).json({ error: "Upload not found" });
+    if (!upload.filename.endsWith(opts.extension))
+      return res.status(400).json({ error: "Not eligible for analysis" });
 
-  analyzeAndroidStatic(hash)
-    .then(() => console.log("Android Static Analysis completed"))
-    .catch(err => {
-      console.error("Android Static Analysis Error:", err);
-      const doc = FileMeta.findOne({ user: user.id, hash });
-      if (doc) FileMeta.update(doc.id, { status: "error" });
-    });
+    // Claim the row *before* charging. The UPDATE only succeeds for one caller,
+    // so two Analyze clicks racing each other can't both dispatch and both pay.
+    if (!FileMeta.claim(upload.id))
+      return res.status(400).json({ error: "File already analyzing or done" });
 
-  FileMeta.update(upload.id, { status: "analyzing" });
+    let remainingCredits: number;
+    try {
+      if (upload.creditSpent) {
+        // Already paid for — a retry after a failed run costs nothing.
+        remainingCredits = await getUserCredits(req.user.uid);
+      } else {
+        const charge = await consumeCredit(
+          req.user.uid,
+          `analysis:${upload.id}`,
+          `${opts.label} ${hash}`
+        );
+        if (!charge.success) {
+          FileMeta.release(upload.id);
+          return res.status(402).json({ error: "No credits left" });
+        }
+        FileMeta.markCreditSpent(upload.id);
+        remainingCredits = charge.remainingCredits!;
+      }
+    } catch (err) {
+      console.error(`${opts.label}: credit charge failed:`, err);
+      FileMeta.release(upload.id);
+      return res.status(500).json({ error: "Server error" });
+    }
 
-  res.json({ message: "Analysis triggered" });
-});
+    // Dispatch on the row id, not the hash: it is the row this caller has just
+    // paid for, and a hash can belong to more than one user's upload.
+    opts.run(upload.id)
+      .then(() => console.log(`${opts.label} completed`))
+      .catch(err => {
+        console.error(`${opts.label} error:`, err);
+        FileMeta.update(upload.id, { status: "error" });
+      });
 
+    res.json({ message: "Analysis triggered", remainingCredits });
+  };
+}
 
-app.post("/android-dynamic-analyze", verifyToken, async (req: AuthRequest, res: Response) => {
-  if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+app.post("/ios-static-analyze", verifyToken, analyzeHandler({
+  analysisType: "static",
+  extension: ".ipa",
+  label: "iOS Static Analysis",
+  run: analyzeIOSStatic,
+}));
 
-  const { hash } = req.body;
-  if (!hash) return res.status(400).json({ error: "Missing hash" });
+app.post("/android-static-analyze", verifyToken, analyzeHandler({
+  analysisType: "static",
+  extension: ".apk",
+  label: "Android Static Analysis",
+  run: analyzeAndroidStatic,
+}));
 
-    // Find the current user
-  const user = User.findById(req.user.uid);
-  if (!user) return res.status(401).json({ error: "User not found" });
-
-  const upload = FileMeta.findOne({ user:user.id, hash, analysisType: "dynamic" });
-  if (!upload) return res.status(404).json({ error: "Upload not found" });
-  if (!(upload.filename.endsWith(".apk") && upload.analysisType === "dynamic"))
-    return res.status(400).json({ error: "Not eligible for analysis" });
-  if (upload.status !== "pending")
-    return res.status(400).json({ error: "File already analyzing or done" });
-
-  analyzeAndroidDynamic(hash)
-    .then(() => console.log("Android Dynamic Analysis completed"))
-    .catch(err => {
-      console.error("Android Dynamic Analysis Error:", err);
-      const doc = FileMeta.findOne({ user: user.id, hash });
-      if (doc) FileMeta.update(doc.id, { status: "error" });
-    });
-
-  FileMeta.update(upload.id, { status: "analyzing" });
-
-  res.json({ message: "Analysis triggered" });
-});
+app.post("/android-dynamic-analyze", verifyToken, analyzeHandler({
+  analysisType: "dynamic",
+  extension: ".apk",
+  label: "Android Dynamic Analysis",
+  run: analyzeAndroidDynamic,
+}));
 
 
 app.post("/generate-report", verifyToken, async (req: AuthRequest, res: Response) => {
@@ -393,6 +419,12 @@ app.patch("/retry", verifyToken, async (req: AuthRequest, res: Response) => {
     const fileDoc = FileMeta.findOne({ hash, analysisType: type, user: user.id });
     if (!fileDoc) return res.status(404).json({ error: "File not found" });
 
+    // Only a failed run can be retried. Re-running is free (the row is already
+    // paid for), so allowing it from `done` would be an unlimited supply of free
+    // analyses, and from `analyzing` it would re-dispatch a job that is still live.
+    if (fileDoc.status !== "error")
+      return res.status(400).json({ error: "Only a failed analysis can be retried" });
+
     FileMeta.update(fileDoc.id, { status: "pending" });
 
     res.json({ message: "File reset to pending" });
@@ -413,8 +445,8 @@ app.post("/api/initUser", verifyToken, async (req: any, res) => {
       user = User.create(uid, email);
     }
 
-    // Firestore holds the credit balance. Seed new users once, with the same
-    // SIGNUP_CREDITS the audit expects to see journaled (server/credit_audit.ts).
+    // Firestore holds the credit balance. New accounts start at SIGNUP_CREDITS,
+    // which is 0 by default — credits are bought, not given away.
     const ref = db.collection("users").doc(uid);
     const snap = await ref.get();
     if (!snap.exists) {
@@ -423,16 +455,20 @@ app.post("/api/initUser", verifyToken, async (req: any, res) => {
         credits: SIGNUP_CREDITS,
         createdAt: FieldValue.serverTimestamp(),
       });
+      // Nothing moved, nothing to journal — a zero-delta row is noise the
+      // reconciliation would have to skip anyway. When the seed *is* positive,
       // ref = uid, so a second seed for the same account cannot be journaled —
       // and an unjournaled grant is exactly what the audit flags.
-      recordCreditChange({
-        uid,
-        delta: SIGNUP_CREDITS,
-        reason: "signup",
-        ref: uid,
-        balanceAfter: SIGNUP_CREDITS,
-        note: email ?? null,
-      });
+      if (SIGNUP_CREDITS > 0) {
+        recordCreditChange({
+          uid,
+          delta: SIGNUP_CREDITS,
+          reason: "signup",
+          ref: uid,
+          balanceAfter: SIGNUP_CREDITS,
+          note: email ?? null,
+        });
+      }
     }
     const credits = snap.exists ? Number(snap.data()?.credits ?? 0) : SIGNUP_CREDITS;
 
@@ -468,25 +504,10 @@ app.get("/api/getCredits", verifyToken, async (req: AuthRequest, res: Response) 
   }
 });
 
-app.post("/api/consumeCredit", verifyToken, async (req: AuthRequest, res: Response) => {
-  if (!req.user) return res.status(401).json({ error: "Unauthorized" });
-
-  try {
-    // Optional, sent by the uploader — recorded in the ledger so a spend can be
-    // traced back to the analysis it paid for.
-    const { hash, type } = req.body ?? {};
-    const note =
-      typeof hash === "string" ? `upload ${hash}${type ? ` (${type})` : ""}` : undefined;
-
-    const result = await consumeCredit(req.user.uid, note);
-    if (!result.success) return res.status(400).json({ error: "No credits left" });
-
-    return res.json({ remainingCredits: result.remainingCredits });
-  } catch (err) {
-    console.error("Consume credit error:", err);
-    return res.status(500).json({ error: "Server error" });
-  }
-});
+// NOTE: there is deliberately no client-callable "spend a credit" endpoint.
+// Credits are now spent by the analyze routes above, on the server, as part of
+// dispatching the work they pay for — a browser that simply never called such an
+// endpoint used to get its analysis for nothing.
 
 app.listen(3000, "0.0.0.0", () => {
   console.log("Backend running on http://localhost:3000");
