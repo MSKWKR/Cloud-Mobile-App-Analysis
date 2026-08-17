@@ -35,6 +35,20 @@ db.exec(`
     UNIQUE (user, hash, analysisType)
   );
 
+  -- The test account a dynamic analysis signs into the app with, so the engine
+  -- can get past the login screen and enumerate what is behind it. Its own table
+  -- rather than columns on file_meta: a secret that can be dropped in one
+  -- statement, is never loaded by the paths that don't need it, and leaves no
+  -- empty columns on the static rows that can never have one.
+  -- Both values are sealed (AES-256-GCM, server/secretbox.ts) — the database
+  -- alone is not a list of passwords.
+  CREATE TABLE IF NOT EXISTS dynamic_credentials (
+    fileId    INTEGER PRIMARY KEY REFERENCES file_meta(id) ON DELETE CASCADE,
+    username  TEXT NOT NULL,   -- sealed
+    password  TEXT NOT NULL,   -- sealed
+    updatedAt TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  );
+
   CREATE TABLE IF NOT EXISTS guest_jobs (
     jobId              TEXT PRIMARY KEY,
     analysisType       TEXT NOT NULL CHECK (analysisType IN ('static','dynamic')),

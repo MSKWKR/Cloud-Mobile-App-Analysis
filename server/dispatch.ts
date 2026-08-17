@@ -2,6 +2,7 @@ import fs from "fs";
 import FormData from "form-data";
 import fetch from "node-fetch";
 import { FileMeta } from "./models/FileMeta";
+import { DynamicCredentials } from "./models/DynamicCredentials";
 import { downloadToTemp, putJson } from "./s3";
 import crypto from "crypto";
 
@@ -192,12 +193,31 @@ export async function analyzeAndroidDynamic(fileId: number) {
     if (fileDoc.analysisType !== "dynamic" || !fileDoc.filename.endsWith(".apk"))
       throw new Error(`File ${fileDoc.filename} is not eligible for APK dynamic analysis`);
 
+    // The test account, if one was given, so the run can get past the login
+    // screen and enumerate what is behind it. This is the only place a stored
+    // password is decrypted, and it travels one way: to the wrapper, never back
+    // to the browser, and never into a log line.
+    //
+    // reveal() throws if the stored value can no longer be opened (the key
+    // changed, the row was tampered with). Failing here is deliberate: running
+    // signed out instead would quietly return a much thinner report for an
+    // analysis the user has already paid for. The retry after re-entering them
+    // is free, since the row is already marked creditSpent.
+    const credentials = DynamicCredentials.reveal(fileDoc.id);
+
     tmpPath = await downloadToTemp(fileDoc.filePath);
 
     const form = new FormData();
     const fileStream = fs.createReadStream(tmpPath);
     form.append("file", fileStream, fileDoc.filename);
     form.append("hash", fileDoc.hash);
+    if (credentials) {
+      form.append("username", credentials.username);
+      form.append("password", credentials.password);
+    }
+    console.log(
+      `Android dynamic: ${fileDoc.filename} (test account: ${credentials ? "provided" : "none"})`
+    );
 
     try {
       FileMeta.update(fileDoc.id, { status: "analyzing" });
@@ -210,6 +230,10 @@ export async function analyzeAndroidDynamic(fileId: number) {
       const result = await res.json() as any;
 
       await putJson(fileDoc.reportPath, result);
+      // The account has done its job. A finished row can't be re-analysed
+      // (/retry only accepts `error`), so keeping the password would be keeping
+      // it forever.
+      DynamicCredentials.remove(fileDoc.id);
       FileMeta.update(fileDoc.id, { status: "done" });
 
       return result;

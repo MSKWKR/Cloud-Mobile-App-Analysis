@@ -2,6 +2,7 @@ import React, { useState, useCallback } from "react";
 import { sha256 } from "js-sha256";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "./ui/input";
 import { Progress } from "@/components/ui/progress";
 import {
   UploadCloud,
@@ -13,6 +14,7 @@ import {
   Zap,
   CheckCircle,
   RotateCcw,
+  KeyRound,
 } from "lucide-react";
 import { getIdToken } from "../firebase/auth";
 import PackedApkNotice from "./PackedApkNotice";
@@ -87,11 +89,27 @@ const RESULT_META: Record<string, ResultMeta> = {
   },
 };
 
+const safeJson = (text: string): any => {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+};
+
+// The upload is never failed over the optional test account, so when the server
+// says it could not keep it, that has to be said rather than silently dropped.
+const credentialWarning = (body: { credentialsError?: string }) =>
+  `The file was stored, but the test account was not: ${body.credentialsError ?? "unknown error"}. ` +
+  `You can set it from the history below before running the analysis.`;
+
 const ResultPanel: React.FC<{
   status: string;
   file: File | null;
+  /** Something that went wrong *beside* the upload itself — e.g. the test account. */
+  note?: string | null;
   onReset: () => void;
-}> = ({ status, file, onReset }) => {
+}> = ({ status, file, note, onReset }) => {
   const meta = RESULT_META[status];
   const Icon = meta.icon;
   return (
@@ -102,6 +120,7 @@ const ResultPanel: React.FC<{
       <div>
         <p className="font-semibold">{meta.title}</p>
         <p className="mt-1 text-sm text-muted-foreground">{meta.desc}</p>
+        {note && <p className="mt-2 text-sm text-amber-500">{note}</p>}
       </div>
       {file && (
         <span className="inline-flex items-center gap-1.5 rounded-full bg-muted/50 px-2.5 py-1 text-xs text-muted-foreground">
@@ -135,12 +154,22 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUpload }) => {
   const [status, setStatus] = useState<string>("idle");
   const [progress, setProgress] = useState<number>(0);
   const [isDragOver, setIsDragOver] = useState(false);
+  // Optional test account for a dynamic run. Held only until the upload carries
+  // it to the server, which is the only place it is ever stored.
+  const [appUsername, setAppUsername] = useState("");
+  const [appPassword, setAppPassword] = useState("");
+  // Set when the file went up fine but the account did not — the upload is not
+  // failed for it, so it has to be said out loud instead.
+  const [credentialNotice, setCredentialNotice] = useState<string | null>(null);
 
   // Helper function that resets state of variables
   const resetState = () => {
     setFile(null);
     setStatus("idle");
     setProgress(0);
+    setAppUsername("");
+    setAppPassword("");
+    setCredentialNotice(null);
   };
 
   // Helper function for calculating SHA-256 hash of a file
@@ -150,8 +179,14 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUpload }) => {
     return sha256(uint8Array);
   };
 
-  // Check with backend if hash already exists for this user and analysis type
-  const checkHash = async (hash: string, analysisType: string) => {
+  // Check with backend if hash already exists for this user and analysis type.
+  // `credentials` rides along because the "reuse" answer *creates* the row for
+  // this analysis type — there is no /upload call on that path to carry them.
+  const checkHash = async (
+    hash: string,
+    analysisType: string,
+    credentials: { username: string; password: string } | null
+  ) => {
     const token = await getIdToken(); // Get the Firebase token
     if (!token) {
       console.error("User not logged in");
@@ -165,7 +200,13 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUpload }) => {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${token}`, // Add the Authorization header
         },
-        body: JSON.stringify({ hash, analysisType }),
+        body: JSON.stringify({
+          hash,
+          analysisType,
+          ...(credentials
+            ? { appUsername: credentials.username, appPassword: credentials.password }
+            : {}),
+        }),
       });
 
       if (!res.ok) {
@@ -197,6 +238,23 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUpload }) => {
       setFile(selectedFile);
       setStatus("check_duplicate");
       setProgress(0);
+      setCredentialNotice(null);
+
+      // Only send an account if it was actually filled in: it is optional, and a
+      // dynamic run without one is still a valid — if shallower — analysis.
+      const credentials =
+        analysisType === "dynamic" && appUsername.trim() && appPassword
+          ? { username: appUsername.trim(), password: appPassword }
+          : null;
+
+      // Half an account is no account. The idle form says so as it is typed, but
+      // that panel is gone by the time the upload lands — say it again here
+      // rather than let a half-filled field pass for nothing at all.
+      if (analysisType === "dynamic" && !credentials && (appUsername.trim() || appPassword))
+        setCredentialNotice(
+          "No test account was saved — a username and a password are both needed. " +
+            "You can set one from the history below."
+        );
 
       // Simulate hashing progress (0 → 20%)
       let simulatedProgress = 0;
@@ -212,14 +270,22 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUpload }) => {
 
       // Check for duplicate file on backend server
       try {
-        const data = await checkHash(hash, analysisType);
+        const data = await checkHash(hash, analysisType, credentials);
 
         switch (data.status) {
           case "duplicate":
+            // Nothing was created to hang an account on, so say where it went
+            // rather than dropping what the user just typed without a word.
+            if (credentials)
+              setCredentialNotice(
+                "The test account wasn't saved — this file already has a dynamic analysis. " +
+                  "Set it on that entry in the history below."
+              );
             setStatus("duplicate_found");
             setProgress(100);
             return;
           case "reuse":
+            if (data.credentialsSaved === false) setCredentialNotice(credentialWarning(data));
             setStatus("reusing_upload");
             setProgress(100);
             onUpload?.(); // Notify parent to refresh UploadHistory
@@ -243,6 +309,10 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUpload }) => {
       formData.append("type", analysisType);
       formData.append("fileType", fileType);
       formData.append("hash", hash);
+      if (credentials) {
+        formData.append("appUsername", credentials.username);
+        formData.append("appPassword", credentials.password);
+      }
 
       // Upload using XMLHttpRequest to track progress
       const xhr = new XMLHttpRequest();
@@ -259,6 +329,10 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUpload }) => {
       xhr.onload = () => {
         setProgress(100);
         if (xhr.status >= 200 && xhr.status < 300) {
+          // The file is stored either way; the account is stored best-effort, so
+          // check whether it made it and say so if it didn't.
+          const body = safeJson(xhr.responseText);
+          if (body?.credentialsSaved === false) setCredentialNotice(credentialWarning(body));
           // Uploading is free — the credit is spent server-side when the
           // analysis is actually dispatched, so nothing is charged here.
           setStatus("uploaded_for_analysis");
@@ -283,7 +357,7 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUpload }) => {
       xhr.setRequestHeader("Authorization", `Bearer ${token}`);
       xhr.send(formData);
     },
-    [analysisType, onUpload]
+    [analysisType, appUsername, appPassword, onUpload]
   );
 
   // Drag and drop handlers
@@ -359,6 +433,47 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUpload }) => {
               {analysisType === "static" && <PackedApkNotice />}
             </div>
 
+            {/* A dynamic run only reaches what a signed-out user reaches. Offer a
+                test account so it can enumerate the app behind the login screen. */}
+            {analysisType === "dynamic" && (
+              <div className="space-y-3 rounded-xl border border-border bg-muted/20 p-4">
+                <div className="flex items-start gap-2.5">
+                  <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                  <div>
+                    <p className="text-sm font-medium">Test account (optional)</p>
+                    <p className="mt-0.5 text-xs leading-snug text-muted-foreground">
+                      Without one, the analysis only covers the screens reachable before
+                      logging in. Credentials are encrypted, used only for this run, and
+                      deleted when it finishes — use a throwaway test account, never a real
+                      user's.
+                    </p>
+                  </div>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Input
+                    type="text"
+                    autoComplete="off"
+                    placeholder="Username or email"
+                    value={appUsername}
+                    onChange={(e) => setAppUsername(e.target.value)}
+                  />
+                  <Input
+                    type="password"
+                    autoComplete="new-password"
+                    placeholder="Password"
+                    value={appPassword}
+                    onChange={(e) => setAppPassword(e.target.value)}
+                  />
+                </div>
+                {/* Both or neither — half an account gets the run nowhere */}
+                {Boolean(appUsername.trim()) !== Boolean(appPassword) && (
+                  <p className="text-xs text-amber-500">
+                    Fill in both fields, or leave both empty to run without signing in.
+                  </p>
+                )}
+              </div>
+            )}
+
             <div
               onDragOver={onDragOver}
               onDragLeave={onDragLeave}
@@ -424,7 +539,7 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUpload }) => {
 
         {/* ── Result states ───────────────────────────────────────────────── */}
         {RESULT_META[status] && (
-          <ResultPanel status={status} file={file} onReset={resetState} />
+          <ResultPanel status={status} file={file} note={credentialNotice} onReset={resetState} />
         )}
 
       </CardContent>

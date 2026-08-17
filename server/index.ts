@@ -8,7 +8,12 @@ import multer from "multer";
 import fs from "fs";
 import os from "os";
 import cors from "cors";
-import { FileMeta } from "./models/FileMeta";
+import { FileMeta, FileMetaRow } from "./models/FileMeta";
+import {
+  DynamicCredentials,
+  startCredentialSweep,
+  validateCredentials,
+} from "./models/DynamicCredentials";
 import { putFile, putJson, objectExists } from "./s3";
 import { analyzeIOSStatic, analyzeAndroidStatic, analyzeAndroidDynamic} from "./dispatch";
 import guestRoutes from "./guest_routes";
@@ -105,7 +110,7 @@ const app = express();
 const allowedOrigin = process.env.CLIENT_URL || "*";
 app.use(cors({
   origin: allowedOrigin,
-  methods: ["GET", "POST", "PATCH", "OPTIONS"],
+  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
 }));
 app.options("*", cors());
@@ -146,6 +151,46 @@ const uploadKey = (uid: string, hash: string, filename: string) =>
 const reportKey = (uid: string, hash: string, analysisType: string) =>
   `reports/${uid}/${hash}/${analysisType}.json`;
 
+const CREDENTIALS_UNAVAILABLE =
+  "Credential storage is not configured on this server (DYNAMIC_CRED_KEY)";
+
+/**
+ * A dynamic run only ever sees what a signed-out user sees, so the user may hand
+ * it a test account to enumerate the app behind the login screen. Both `/upload`
+ * and `/check-hash` can carry that account alongside the file they create a row
+ * for (`appUsername` / `appPassword`), and both treat it as best effort: the
+ * binary is already in S3 and the row already exists, so a credential problem is
+ * *reported next to* a successful upload rather than failing one — losing a
+ * 500 MB transfer over a mistyped field would be a poor trade, and the account
+ * can be set from the history list afterwards.
+ *
+ * Returns the fields to merge into the response: nothing at all when no account
+ * was offered, `credentialsSaved` either way when one was.
+ */
+function attachCredentials(row: FileMetaRow, body: any): Record<string, unknown> {
+  const username = body?.appUsername;
+  const password = body?.appPassword;
+  // Absent, or present-but-blank (an untouched optional field): nothing offered.
+  if (!username && !password) return {};
+
+  if (row.analysisType !== "dynamic")
+    return { credentialsSaved: false, credentialsError: "Credentials only apply to dynamic analysis" };
+
+  const invalid = validateCredentials(username, password);
+  if (invalid) return { credentialsSaved: false, credentialsError: invalid };
+
+  if (!DynamicCredentials.supported())
+    return { credentialsSaved: false, credentialsError: CREDENTIALS_UNAVAILABLE };
+
+  try {
+    DynamicCredentials.set(row.id, { username, password });
+    return { credentialsSaved: true };
+  } catch (err) {
+    console.error("Storing dynamic credentials failed:", err);
+    return { credentialsSaved: false, credentialsError: "Server error" };
+  }
+}
+
 // Upload file. Free — a credit is charged per analysis, not per upload.
 app.post("/upload", verifyToken, requireCredits, upload.single("file"), async (req: AuthRequest, res: Response) => {
   if (!req.user) return res.status(401).json({ message: "Unauthorized" });
@@ -178,8 +223,11 @@ app.post("/upload", verifyToken, requireCredits, upload.single("file"), async (r
     status: "pending",
   });
 
+  // Optional test account for a dynamic run, sent as ordinary multipart fields.
+  const credentials = attachCredentials(meta, req.body);
+
   const remainingCredits = await getUserCredits(req.user.uid);
-  res.json({ message: "File uploaded", meta, remainingCredits });
+  res.json({ message: "File uploaded", meta, remainingCredits, ...credentials });
 });
 
 // List uploads for each user
@@ -197,6 +245,14 @@ app.get("/uploads", verifyToken, async (req: AuthRequest, res: Response) => {
   console.log("User found:", user);
 
   const uploads = FileMeta.find({ user: user.id }); // Already sorted by uploadTime DESC
+
+  // Which dynamic rows carry a test account, and under what name. The username
+  // goes back to its owner so they can see which account is stored; the password
+  // never leaves this server — it only travels on to the analysis engine.
+  const credentials = DynamicCredentials.listFor(
+    uploads.filter(u => u.analysisType === "dynamic").map(u => u.id)
+  );
+
   const sanitized = uploads.map(u => ({
     id: String(u.id),
     filename: u.filename,
@@ -208,6 +264,9 @@ app.get("/uploads", verifyToken, async (req: AuthRequest, res: Response) => {
     // an analysis that was already paid for does not.
     creditSpent: !!u.creditSpent,
     uploadTime: u.uploadTime,
+    hasCredentials: credentials.has(u.id),
+    // null also when the stored value cannot be decrypted — present, unreadable.
+    credentialUsername: credentials.get(u.id)?.username ?? null,
   }));
 
   res.json(sanitized);
@@ -258,14 +317,90 @@ app.post("/check-hash", verifyToken, async (req: AuthRequest, res: Response) => 
       });
       await putJson(reportPath, { status: "pending" });
 
+      // This is the other way a dynamic row is born — no /upload call happens on
+      // this path, so the test account has to be accepted here too.
+      const credentials = attachCredentials(meta, req.body);
+
       return res.json({
         status: "reuse",
         message: "File with same hash but different analysis type exists",
+        ...credentials,
       });
     }
 
   } catch (err) {
     console.error("Check-hash error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
+ * Managing the test account after the fact — the upload is long done, the user
+ * has thought better of the account they gave, or they never gave one because
+ * the row came from the `reuse` branch of /check-hash.
+ *
+ * Resolves the caller's own dynamic row for a hash, or the reason there isn't
+ * one to write to. Ownership is not a filter to remember to add here: the lookup
+ * is keyed on (user, hash, analysisType), so another account's row is not found
+ * rather than found-and-refused.
+ */
+type DynamicRowLookup = { row: FileMetaRow } | { status: number; error: string };
+
+function findDynamicRow(uid: string, hash: unknown): DynamicRowLookup {
+  if (typeof hash !== "string" || !hash) return { status: 400, error: "Missing hash" };
+
+  const user = User.findById(uid);
+  if (!user) return { status: 401, error: "User not found" };
+
+  const row = FileMeta.findOne({ user: user.id, hash, analysisType: "dynamic" });
+  if (!row) return { status: 404, error: "No dynamic analysis found for this file" };
+
+  // Only a run that hasn't started can still be told who to log in as. A row
+  // that is `analyzing` has already handed its account to the engine, and a
+  // `done` one cannot be re-run at all.
+  if (row.status !== "pending" && row.status !== "error")
+    return { status: 409, error: "Analysis is already running or finished" };
+
+  return { row };
+}
+
+// Set or replace the account a dynamic run signs in with. Write-only by design:
+// there is no route that reads a stored password back out.
+app.post("/dynamic-credentials", verifyToken, async (req: AuthRequest, res: Response) => {
+  if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+  const { hash, username, password } = req.body ?? {};
+  const invalid = validateCredentials(username, password);
+  if (invalid) return res.status(400).json({ error: invalid });
+
+  if (!DynamicCredentials.supported())
+    return res.status(503).json({ error: CREDENTIALS_UNAVAILABLE });
+
+  const found = findDynamicRow(req.user.uid, hash);
+  if (!("row" in found)) return res.status(found.status).json({ error: found.error });
+
+  try {
+    const saved = DynamicCredentials.set(found.row.id, { username, password });
+    res.json({ message: "Credentials saved", ...saved });
+  } catch (err) {
+    console.error("Storing dynamic credentials failed:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Forget the account. Also the fix for a value that outlived its key: the run
+// stays possible, it just runs signed out.
+app.delete("/dynamic-credentials/:hash", verifyToken, async (req: AuthRequest, res: Response) => {
+  if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+  const found = findDynamicRow(req.user.uid, req.params.hash);
+  if (!("row" in found)) return res.status(found.status).json({ error: found.error });
+
+  try {
+    DynamicCredentials.remove(found.row.id);
+    res.json({ message: "Credentials removed" });
+  } catch (err) {
+    console.error("Removing dynamic credentials failed:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
@@ -516,4 +651,7 @@ app.listen(3000, "0.0.0.0", () => {
   startFxRefresh();
   // Daily snapshot + reconciliation of every credit balance against the ledger.
   startCreditAudit();
+  // Drop stored test accounts whose analysis was never run — a password is a
+  // liability for exactly as long as it is kept.
+  startCredentialSweep();
 });
