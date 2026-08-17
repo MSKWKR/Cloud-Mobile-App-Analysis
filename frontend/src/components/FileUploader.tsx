@@ -443,9 +443,14 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUpload }) => {
                     <p className="text-sm font-medium">Test account (optional)</p>
                     <p className="mt-0.5 text-xs leading-snug text-muted-foreground">
                       Without one, the analysis only covers the screens reachable before
-                      logging in. Credentials are encrypted, used only for this run, and
-                      deleted when it finishes — use a throwaway test account, never a real
-                      user's.
+                      logging in. Use a throwaway test account, never a real user's.
+                    </p>
+                    <p className="mt-1.5 text-xs leading-snug text-muted-foreground">
+                      <span className="font-medium text-foreground">
+                        We delete the account as soon as the analysis finishes.
+                      </span>{" "}
+                      It is encrypted until then, never stored permanently, and removed
+                      automatically if you never run the analysis.
                     </p>
                   </div>
                 </div>

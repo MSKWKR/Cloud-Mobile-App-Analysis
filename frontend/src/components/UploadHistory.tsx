@@ -142,9 +142,11 @@ const CredentialsPanel: React.FC<{ upload: UploadEntry; onChanged: () => void }>
             />
           </div>
           <div className="flex items-center justify-between gap-2">
-            <p className="text-xs text-muted-foreground">
-              Encrypted at rest and deleted once the analysis finishes. Use a throwaway
-              test account, never a real user's.
+            <p className="text-xs leading-snug text-muted-foreground">
+              <span className="font-medium text-foreground">
+                We delete the account as soon as the analysis finishes.
+              </span>{" "}
+              Encrypted until then. Use a throwaway test account, never a real user's.
             </p>
             <Button
               size="sm"
